@@ -1,0 +1,9 @@
+config.py
+models/
+*.csv
+__pycache__/
+*.pyc
+order_logs/
+risk_logs/
+training_logs/
+.env
