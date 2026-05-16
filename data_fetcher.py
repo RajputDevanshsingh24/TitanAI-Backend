@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — Data Fetcher v3.0
+# TITAN-AI TRADER — Data Fetcher v4.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -9,7 +9,6 @@ import pandas as pd
 import time
 import os
 from datetime import datetime, timedelta
-from config import ANGEL_ONE
 
 class DataFetcher:
 
@@ -18,40 +17,40 @@ class DataFetcher:
         self.connected = False
 
     # ============================================
-    # ANGEL ONE SE CONNECT
+    # CONNECT
     # ============================================
     def connect(self):
         try:
             print("🔌 Connecting to Angel One...")
 
-            # Debug — values check karo
-            api_key  = ANGEL_ONE.get("api_key", "")
-            secret   = ANGEL_ONE.get("secret_key", "")
-            client   = ANGEL_ONE.get("client_id", "")
-            password = ANGEL_ONE.get("password", "")
-            totp_key = ANGEL_ONE.get("totp_key", "")
+            # Seedha os.environ se lo
+            api_key  = os.environ.get("ANGEL_API_KEY", "")
+            client   = os.environ.get("ANGEL_CLIENT_ID", "AACG329697")
+            password = os.environ.get("ANGEL_PASSWORD", "")
+            totp_key = os.environ.get("ANGEL_TOTP_KEY", "")
 
-            print(f"   API Key:  {api_key[:4] if api_key else 'EMPTY!'}****")
-            print(f"   Client:   {client if client else 'EMPTY!'}")
-            print(f"   Password: {'SET ✅' if password else 'EMPTY! ❌'}")
-            print(f"   TOTP Key: {'SET ✅' if totp_key else 'EMPTY! ❌'}")
+            # Debug print
+            print(f"   API Key:  {api_key[:4] if api_key else 'EMPTY'}****")
+            print(f"   Client:   {client}")
+            print(f"   Password: {'SET ✅' if password else 'EMPTY ❌'}")
+            print(f"   TOTP Key: {'SET ✅' if totp_key else 'EMPTY ❌'}")
 
             # Validation
             if not api_key:
-                print("❌ API Key missing!")
+                print("❌ ANGEL_API_KEY missing in Railway!")
                 return False
             if not password:
-                print("❌ Password missing!")
+                print("❌ ANGEL_PASSWORD missing in Railway!")
                 return False
             if not totp_key:
-                print("❌ TOTP Key missing!")
+                print("❌ ANGEL_TOTP_KEY missing in Railway!")
                 return False
 
-            # TOTP generate karo
+            # TOTP generate
             totp = pyotp.TOTP(totp_key).now()
-            print(f"   TOTP:     {totp}")
+            print(f"   TOTP Code: {totp}")
 
-            # Connect karo
+            # Login
             self.api = SmartConnect(api_key=api_key)
             data     = self.api.generateSession(
                 client, password, totp
@@ -70,7 +69,7 @@ class DataFetcher:
             return False
 
     # ============================================
-    # LIVE PRICE LO
+    # LIVE PRICE
     # ============================================
     def get_live_price(self, symbol="NIFTY"):
         try:
@@ -78,8 +77,8 @@ class DataFetcher:
                 self.connect()
 
             symbols = {
-                "NIFTY"     : {"token": "99926000", "exchange": "NSE"},
-                "BANKNIFTY" : {"token": "99926009", "exchange": "NSE"},
+                "NIFTY"    : {"token": "99926000", "exchange": "NSE"},
+                "BANKNIFTY": {"token": "99926009", "exchange": "NSE"},
             }
             s     = symbols[symbol]
             data  = self.api.ltpData(
@@ -90,11 +89,11 @@ class DataFetcher:
             return price
 
         except Exception as e:
-            print(f"❌ Live Price Error: {e}")
+            print(f"❌ Price Error: {e}")
             return None
 
     # ============================================
-    # EK BATCH KA DATA
+    # BATCH DATA
     # ============================================
     def _fetch_batch(self, token, from_date, to_date):
         try:
@@ -121,22 +120,19 @@ class DataFetcher:
             if not self.connected:
                 success = self.connect()
                 if not success:
-                    print("❌ Connected nahi — data nahi milega!")
+                    print("❌ Connect fail — data nahi milega!")
                     return None
 
             tokens = {
-                "NIFTY"     : "99926000",
-                "BANKNIFTY" : "99926009",
+                "NIFTY"    : "99926000",
+                "BANKNIFTY": "99926009",
             }
-            token    = tokens[symbol]
-            all_data = []
-
+            token      = tokens[symbol]
+            all_data   = []
             end_date   = datetime.now()
             start_date = end_date - timedelta(days=days)
 
             print(f"📅 {days} din ka data fetch ho raha hai...")
-            print(f"   From: {start_date.strftime('%Y-%m-%d')}")
-            print(f"   To:   {end_date.strftime('%Y-%m-%d')}")
 
             chunk_days  = 90
             current_end = end_date
@@ -170,17 +166,7 @@ class DataFetcher:
             df.set_index("Date", inplace=True)
             df["Volume"] = df["Volume"].replace(0, 1)
 
-            print(f"\n✅ Total {len(df)} din ka data ready!")
-            print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
-            print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
-
-            # CSV save
-            try:
-                df.to_csv(f"{symbol}_data.csv")
-                print(f"💾 Data saved: {symbol}_data.csv")
-            except:
-                pass
-
+            print(f"✅ Total {len(df)} din ka data ready!")
             return df
 
         except Exception as e:
@@ -196,8 +182,8 @@ class DataFetcher:
                 self.connect()
 
             tokens = {
-                "NIFTY"     : "99926000",
-                "BANKNIFTY" : "99926009",
+                "NIFTY"    : "99926000",
+                "BANKNIFTY": "99926009",
             }
             token = tokens[symbol]
             end   = datetime.now()
@@ -210,7 +196,6 @@ class DataFetcher:
                 "fromdate"    : start.strftime("%Y-%m-%d 09:00"),
                 "todate"      : end.strftime("%Y-%m-%d 15:30")
             }
-
             data = self.api.getCandleData(params)
 
             if data["status"] and data["data"]:
@@ -234,18 +219,16 @@ class DataFetcher:
 # TEST
 # ============================================
 if __name__ == "__main__":
-    print("="*50)
-    print("🧪 DATA FETCHER TEST")
-    print("="*50)
+    # Local test ke liye hardcode
+    os.environ["ANGEL_API_KEY"]    = "mB3Hghfu"
+    os.environ["ANGEL_SECRET_KEY"] = "36e27781-9351-4fbf-8143-973c0219b976"
+    os.environ["ANGEL_CLIENT_ID"]  = "AACG329697"
+    os.environ["ANGEL_PASSWORD"]   = "4160"
+    os.environ["ANGEL_TOTP_KEY"]   = "TOTP_KEY_YAHAN"
 
     fetcher = DataFetcher()
-
     if fetcher.connect():
         fetcher.get_live_price("NIFTY")
-        fetcher.get_live_price("BANKNIFTY")
-        df = fetcher.get_historical_data("NIFTY", days=365)
+        df = fetcher.get_historical_data("NIFTY", days=100)
         if df is not None:
             print(df.tail())
-    else:
-        print("❌ Connection failed!")
-        print("   Check Railway variables!")
