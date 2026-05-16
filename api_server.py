@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — API Server
+# TITAN-AI TRADER — API Server v2.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -18,14 +18,14 @@ from config import TRADING
 # ============================================
 # APP SETUP
 # ============================================
-app    = FastAPI(title="TITAN-AI TRADER API")
-bot    = None
+app = FastAPI(title="TITAN-AI TRADER API")
+bot = None
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["*"],
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins  = ["*"],
+    allow_methods  = ["*"],
+    allow_headers  = ["*"],
 )
 
 # ============================================
@@ -33,25 +33,48 @@ app.add_middleware(
 # ============================================
 class BotState:
     def __init__(self):
-        self.fetcher    = DataFetcher()
-        self.model      = AIModel()
-        self.order_mgr  = OrderManager()
-        self.trainer    = AutoTrainer()
-        self.df         = None
-        self.running    = False
-        self.last_signal= None
+        self.fetcher     = DataFetcher()
+        self.model       = AIModel()
+        self.order_mgr   = OrderManager()
+        self.trainer     = AutoTrainer()
+        self.df          = None
+        self.running     = False
+        self.last_signal = None
         self._init()
 
     def _init(self):
-        self.fetcher.connect()
-        self.df = self.fetcher.get_historical_data(
-            "NIFTY", days=365
-        )
-        if not self.model.load_model():
-            self.model.train(self.df)
-        self.order_mgr.fetcher = self.fetcher
-        self.running = True
-        print("✅ Bot State Ready!")
+        try:
+            print("🔌 Bot initializing...")
+
+            # Connect karo
+            connected = self.fetcher.connect()
+
+            if connected:
+                print("✅ Connected! Data fetch ho raha hai...")
+                self.df = self.fetcher.get_historical_data(
+                    "NIFTY", days=365
+                )
+            else:
+                print("⚠️ Connection failed — offline mode!")
+                self.df = None
+
+            # Model load ya train karo
+            if self.df is not None:
+                loaded = self.model.load_model()
+                if not loaded:
+                    print("🤖 Training shuru ho rahi hai...")
+                    self.model.train(self.df)
+            else:
+                print("⚠️ Data nahi mila — model skip!")
+                self.model.accuracy = 0
+
+            self.order_mgr.fetcher = self.fetcher
+            self.running = True
+            print("✅ Bot State Ready!")
+
+        except Exception as e:
+            print(f"⚠️ Init Error: {e}")
+            self.running = False
 
 
 # ============================================
@@ -66,11 +89,11 @@ async def startup():
 
 
 # ============================================
-# MODELS (Request/Response)
+# MODELS
 # ============================================
 class TradeRequest(BaseModel):
-    symbol    : str = "NIFTY"
-    quantity  : int = 1
+    symbol   : str = "NIFTY"
+    quantity : int = 1
 
 class SettingsUpdate(BaseModel):
     stop_loss  : float = 20.0
@@ -90,6 +113,7 @@ async def root():
         "status"  : "running",
         "app"     : "TITAN-AI TRADER",
         "company" : "TITAN-SURYA TECHNOLOGIES",
+        "bot"     : bot.running if bot else False,
         "time"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -97,27 +121,34 @@ async def root():
 @app.get("/status")
 async def get_status():
     try:
-        risk   = bot.order_mgr.risk
-        price  = bot.fetcher.get_live_price("NIFTY")
-        bnprice= bot.fetcher.get_live_price("BANKNIFTY")
-        net    = risk.daily_profit - risk.daily_loss
+        risk    = bot.order_mgr.risk
+        net     = risk.daily_profit - risk.daily_loss
+        
+        # Live prices
+        try:
+            nifty  = bot.fetcher.get_live_price("NIFTY")
+            bn     = bot.fetcher.get_live_price("BANKNIFTY")
+        except:
+            nifty  = 0
+            bn     = 0
 
         return {
-            "status"        : "success",
-            "bot_running"   : bot.running,
-            "mode"          : TRADING["mode"],
-            "capital"       : risk.capital,
-            "daily_pnl"     : net,
-            "daily_profit"  : risk.daily_profit,
-            "daily_loss"    : risk.daily_loss,
-            "trades_today"  : risk.trades_today,
-            "max_trades"    : risk.max_trades,
-            "ai_accuracy"   : bot.model.accuracy,
-            "nifty_price"   : price,
-            "banknifty"     : bnprice,
-            "active_trades" : len(risk.active_trades),
-            "timestamp"     : datetime.now().strftime(
-                              "%Y-%m-%d %H:%M:%S")
+            "status"       : "success",
+            "bot_running"  : bot.running,
+            "mode"         : TRADING["mode"],
+            "capital"      : risk.capital,
+            "daily_pnl"    : net,
+            "daily_profit" : risk.daily_profit,
+            "daily_loss"   : risk.daily_loss,
+            "trades_today" : risk.trades_today,
+            "max_trades"   : risk.max_trades,
+            "ai_accuracy"  : bot.model.accuracy,
+            "nifty_price"  : nifty,
+            "banknifty"    : bn,
+            "active_trades": len(risk.active_trades),
+            "data_loaded"  : bot.df is not None,
+            "timestamp"    : datetime.now().strftime(
+                             "%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -127,22 +158,35 @@ async def get_status():
 @app.get("/signal")
 async def get_signal():
     try:
+        if bot.df is None:
+            return {
+                "status"  : "offline",
+                "message" : "Data nahi mila — reconnecting..."
+            }
+
         from indicators import Indicators
-        ind    = Indicators(bot.df.copy())
+        ind        = Indicators(bot.df.copy())
         ind.add_rsi().add_macd().add_bollinger().add_ema()
         ind_signal = ind.get_signal()
-        ai_signal  = bot.model.predict(bot.df)
+
+        if bot.model.is_trained:
+            ai_signal = bot.model.predict(bot.df)
+        else:
+            ai_signal = {
+                "signal"    : "🟡 NO TRADE",
+                "confidence": 0
+            }
 
         return {
-            "status"          : "success",
-            "ai_signal"       : ai_signal["signal"],
-            "ai_confidence"   : ai_signal["confidence"],
-            "indicator_signal": ind_signal["signal"],
-            "indicator_score" : ind_signal["score"],
-            "rsi"             : ind_signal["rsi"],
-            "reasons"         : ind_signal["reasons"],
-            "timestamp"       : datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S")
+            "status"           : "success",
+            "ai_signal"        : ai_signal["signal"],
+            "ai_confidence"    : ai_signal["confidence"],
+            "indicator_signal" : ind_signal["signal"],
+            "indicator_score"  : ind_signal["score"],
+            "rsi"              : ind_signal["rsi"],
+            "reasons"          : ind_signal["reasons"],
+            "timestamp"        : datetime.now().strftime(
+                                 "%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -152,12 +196,12 @@ async def get_signal():
 @app.get("/prices")
 async def get_prices():
     try:
-        nifty    = bot.fetcher.get_live_price("NIFTY")
-        banknifty= bot.fetcher.get_live_price("BANKNIFTY")
+        nifty = bot.fetcher.get_live_price("NIFTY")
+        bn    = bot.fetcher.get_live_price("BANKNIFTY")
         return {
             "status"    : "success",
             "nifty"     : nifty,
-            "banknifty" : banknifty,
+            "banknifty" : bn,
             "timestamp" : datetime.now().strftime(
                           "%Y-%m-%d %H:%M:%S")
         }
@@ -165,10 +209,43 @@ async def get_prices():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 5. Execute Trade
+# 5. Reconnect
+@app.post("/reconnect")
+async def reconnect():
+    try:
+        def reconnect_bg():
+            connected = bot.fetcher.connect()
+            if connected:
+                bot.df = bot.fetcher.get_historical_data(
+                    "NIFTY", days=365
+                )
+                if bot.df is not None:
+                    if not bot.model.is_trained:
+                        bot.model.train(bot.df)
+                bot.running = True
+                print("✅ Reconnected!")
+
+        thread = threading.Thread(target=reconnect_bg)
+        thread.start()
+
+        return {
+            "status"  : "success",
+            "message" : "Reconnecting..."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 6. Execute Trade
 @app.post("/trade/execute")
 async def execute_trade(req: TradeRequest):
     try:
+        if bot.df is None:
+            return {
+                "status"  : "error",
+                "message" : "Bot offline hai!"
+            }
+
         signal = bot.model.predict(bot.df)
         if not signal:
             raise HTTPException(
@@ -196,7 +273,7 @@ async def execute_trade(req: TradeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 6. Exit Trade
+# 7. Exit Trade
 @app.post("/trade/exit/{order_id}")
 async def exit_trade(order_id: str):
     try:
@@ -212,7 +289,7 @@ async def exit_trade(order_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 7. Active Trades
+# 8. Active Trades
 @app.get("/trades/active")
 async def get_active_trades():
     try:
@@ -228,7 +305,7 @@ async def get_active_trades():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 8. Trade History
+# 9. Trade History
 @app.get("/trades/history")
 async def get_trade_history():
     try:
@@ -242,35 +319,40 @@ async def get_trade_history():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 9. Manual Train
+# 10. Manual Train
 @app.post("/train")
 async def manual_train():
     try:
         def train_bg():
-            bot.df = bot.fetcher.get_historical_data(
-                "NIFTY", days=365
-            )
-            bot.model.train(bot.df)
+            if bot.fetcher.connected:
+                bot.df = bot.fetcher.get_historical_data(
+                    "NIFTY", days=365
+                )
+            if bot.df is not None:
+                bot.model.train(bot.df)
+                print("✅ Training complete!")
+            else:
+                print("❌ Data nahi mila!")
 
         thread = threading.Thread(target=train_bg)
         thread.start()
 
         return {
             "status"  : "success",
-            "message" : "Training shuru ho gayi! Background mein chalegi."
+            "message" : "Training shuru!"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 10. Update Settings
+# 11. Update Settings
 @app.post("/settings")
 async def update_settings(s: SettingsUpdate):
     try:
-        bot.order_mgr.risk.stop_loss_pct  = s.stop_loss
-        bot.order_mgr.risk.target_pct     = s.target
-        bot.order_mgr.risk.max_trades     = s.max_trades
-        bot.order_mgr.risk.capital        = s.capital
+        bot.order_mgr.risk.stop_loss_pct = s.stop_loss
+        bot.order_mgr.risk.target_pct    = s.target
+        bot.order_mgr.risk.max_trades    = s.max_trades
+        bot.order_mgr.risk.capital       = s.capital
 
         return {
             "status"  : "success",
@@ -286,7 +368,7 @@ async def update_settings(s: SettingsUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 11. Emergency Stop
+# 12. Emergency Stop
 @app.post("/emergency_stop")
 async def emergency_stop():
     try:
@@ -294,13 +376,13 @@ async def emergency_stop():
         bot.running = False
         return {
             "status"  : "success",
-            "message" : "🔴 Emergency stop activated!"
+            "message" : "🔴 Emergency stop!"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 12. Training History
+# 13. Training History
 @app.get("/training/history")
 async def training_history():
     try:
@@ -315,7 +397,7 @@ async def training_history():
 
 
 # ============================================
-# SERVER CHALAO
+# SERVER
 # ============================================
 if __name__ == "__main__":
     print("🚀 TITAN-AI SERVER STARTING...")
@@ -323,7 +405,7 @@ if __name__ == "__main__":
     print("   Docs: http://localhost:8000/docs")
     uvicorn.run(
         "api_server:app",
-        host    = "0.0.0.0",
-        port    = 8000,
-        reload  = False
+        host   = "0.0.0.0",
+        port   = 8000,
+        reload = False
     )
