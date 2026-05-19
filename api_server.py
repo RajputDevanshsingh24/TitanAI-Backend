@@ -1,14 +1,16 @@
 # ============================================
-# TITAN-AI TRADER — API Server v2.0
+# TITAN-AI TRADER — API Server v4.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
 import threading
+import schedule
+import time
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, time as dtime
 from data_fetcher import DataFetcher
 from ai_model import AIModel
 from order_manager import OrderManager
@@ -29,7 +31,7 @@ app.add_middleware(
 )
 
 # ============================================
-# BOT CLASS
+# BOT STATE
 # ============================================
 class BotState:
     def __init__(self):
@@ -40,41 +42,221 @@ class BotState:
         self.df          = None
         self.running     = False
         self.last_signal = None
+        self.trade_count = 0
         self._init()
 
     def _init(self):
         try:
             print("🔌 Bot initializing...")
 
-            # Connect karo
-            connected = self.fetcher.connect()
+            # STEP 1: yfinance se 5 saal ka data lo
+            print("📊 yfinance se data fetch kar raha hun...")
+            self.df = self.fetcher.get_historical_data_yfinance(
+                "NIFTY", years=5
+            )
 
-            if connected:
-                print("✅ Connected! Data fetch ho raha hai...")
-                self.df = self.fetcher.get_historical_data(
-                    "NIFTY", days=365
-                )
+            # STEP 2: Fail hone pe Angel One se lo
+            if self.df is None:
+                print("⚠️ yfinance failed — Angel One try...")
+                connected = self.fetcher.connect()
+                if connected:
+                    self.df = self.fetcher.get_historical_data(
+                        "NIFTY", days=365
+                    )
             else:
-                print("⚠️ Connection failed — offline mode!")
-                self.df = None
+                # Angel One bhi connect karo
+                self.fetcher.connect()
 
-            # Model load ya train karo
+            # STEP 3: Model load ya train
             if self.df is not None:
+                print(f"✅ Data ready: {len(self.df)} rows")
                 loaded = self.model.load_model()
                 if not loaded:
-                    print("🤖 Training shuru ho rahi hai...")
+                    print("🤖 Training shuru...")
                     self.model.train(self.df)
             else:
-                print("⚠️ Data nahi mila — model skip!")
+                print("⚠️ Data nahi mila!")
                 self.model.accuracy = 0
 
             self.order_mgr.fetcher = self.fetcher
             self.running = True
-            print("✅ Bot State Ready!")
+            print("✅ Bot Ready!")
 
         except Exception as e:
             print(f"⚠️ Init Error: {e}")
             self.running = False
+
+
+# ============================================
+# MARKET OPEN CHECK
+# ============================================
+def is_market_open():
+    now     = datetime.now()
+    weekday = now.weekday()
+    if weekday >= 5:
+        return False
+    market_open  = dtime(9, 15)
+    market_close = dtime(15, 30)
+    return market_open <= now.time() <= market_close
+
+
+# ============================================
+# AUTO TRADING FUNCTION
+# ============================================
+def bot_trade():
+    try:
+        if bot is None or not bot.running:
+            return
+
+        # Market hours check
+        if not is_market_open():
+            print("🕐 Market band hai — skipping")
+            return
+
+        # Data check
+        if bot.df is None:
+            print("⚠️ Data nahi — reconnecting...")
+            bot.fetcher.connect()
+            bot.df = bot.fetcher.get_historical_data_yfinance(
+                "NIFTY", years=5
+            )
+            return
+
+        # Model check
+        if not bot.model.is_trained:
+            print("⚠️ Model trained nahi — skip")
+            return
+
+        # Risk check
+        can, reasons = bot.order_mgr.risk.can_trade()
+        if not can:
+            for r in reasons:
+                print(r)
+            return
+
+        # Signal lo
+        signal = bot.model.predict(bot.df)
+        if not signal:
+            print("❌ Signal nahi mila")
+            return
+
+        print(f"\n🎯 Auto Trade Check:")
+        print(f"   Signal:     {signal['signal']}")
+        print(f"   Confidence: {signal['confidence']:.1f}%")
+
+        # Same signal skip
+        if signal["value"] == bot.last_signal:
+            print("⚠️ Same signal — skip")
+            return
+
+        # Minimum confidence: 45%
+        if signal["confidence"] < 45:
+            print(f"⚠️ Low confidence — skip")
+            return
+
+        # NO TRADE signal
+        if signal["value"] == 0:
+            print("🟡 NO TRADE — waiting")
+            return
+
+        # Order execute karo
+        order_id = bot.order_mgr.execute_signal(
+            signal, "NIFTY"
+        )
+
+        if order_id:
+            bot.last_signal  = signal["value"]
+            bot.trade_count += 1
+            print(f"✅ Trade executed: {order_id}")
+        else:
+            print("⚠️ Trade execute nahi hua")
+
+    except Exception as e:
+        print(f"❌ Auto Trading Error: {e}")
+
+
+# ============================================
+# DATA REFRESH
+# ============================================
+def refresh_data():
+    try:
+        if bot:
+            # yfinance se latest data lo
+            df = bot.fetcher.get_historical_data_yfinance(
+                "NIFTY", years=5
+            )
+            if df is not None:
+                bot.df = df
+                print("✅ Data refreshed!")
+    except Exception as e:
+        print(f"❌ Data refresh error: {e}")
+
+
+# ============================================
+# AUTO RETRAIN
+# ============================================
+def auto_retrain():
+    try:
+        print("\n🔄 Auto retraining shuru...")
+        if bot:
+            # Fresh data lo
+            df = bot.fetcher.get_historical_data_yfinance(
+                "NIFTY", years=5
+            )
+            if df is not None:
+                bot.df = df
+            if bot.df is not None:
+                bot.trainer.train_once()
+                print("✅ Auto retrain complete!")
+    except Exception as e:
+        print(f"❌ Auto retrain error: {e}")
+
+
+# ============================================
+# DAILY RESET
+# ============================================
+def daily_reset():
+    if bot:
+        bot.order_mgr.risk.daily_loss   = 0
+        bot.order_mgr.risk.daily_profit = 0
+        bot.order_mgr.risk.trades_today = 0
+        bot.order_mgr.risk.bot_active   = True
+        bot.last_signal = None
+        bot.trade_count = 0
+        print("✅ Daily reset complete!")
+
+
+# ============================================
+# BACKGROUND SCHEDULER
+# ============================================
+def start_scheduler():
+    # Har 5 min mein trade check
+    schedule.every(5).minutes.do(bot_trade)
+
+    # Har 1 ghante mein data refresh
+    schedule.every(1).hours.do(refresh_data)
+
+    # Raat 11 PM auto retrain
+    schedule.every().day.at("23:00").do(auto_retrain)
+
+    # Subah 9:10 AM daily reset
+    schedule.every().day.at("09:10").do(daily_reset)
+
+    # Market close ke baad summary
+    schedule.every().day.at("15:35").do(
+        lambda: bot.order_mgr.risk.daily_summary()
+        if bot else None
+    )
+
+    print("⏰ Scheduler started!")
+    print("   → Trade: Har 5 min")
+    print("   → Refresh: Har 1 ghanta")
+    print("   → Retrain: Raat 11 PM")
+    print("   → Reset: 9:10 AM")
+
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
 
 
 # ============================================
@@ -85,11 +267,22 @@ async def startup():
     global bot
     print("🚀 TITAN-AI SERVER STARTING...")
     bot = BotState()
-    print("✅ Server Ready!")
+
+    # Background scheduler
+    scheduler_thread = threading.Thread(
+        target=start_scheduler,
+        daemon=True
+    )
+    scheduler_thread.start()
+
+    print("✅ Server + Auto Trading Ready!")
+    print(f"   Market: {'OPEN 🟢' if is_market_open() else 'CLOSED 🔴'}")
+    print(f"   Data:   {len(bot.df) if bot.df is not None else 0} rows")
+    print(f"   Model:  {bot.model.accuracy:.1f}% accuracy")
 
 
 # ============================================
-# MODELS
+# REQUEST MODELS
 # ============================================
 class TradeRequest(BaseModel):
     symbol   : str = "NIFTY"
@@ -103,52 +296,58 @@ class SettingsUpdate(BaseModel):
 
 
 # ============================================
-# ENDPOINTS
+# API ENDPOINTS
 # ============================================
 
 # 1. Health Check
 @app.get("/")
 async def root():
     return {
-        "status"  : "running",
-        "app"     : "TITAN-AI TRADER",
-        "company" : "TITAN-SURYA TECHNOLOGIES",
-        "bot"     : bot.running if bot else False,
-        "time"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "status"      : "running",
+        "app"         : "TITAN-AI TRADER",
+        "company"     : "TITAN-SURYA TECHNOLOGIES",
+        "bot"         : bot.running if bot else False,
+        "market_open" : is_market_open(),
+        "data_rows"   : len(bot.df) if bot and bot.df is not None else 0,
+        "accuracy"    : bot.model.accuracy if bot else 0,
+        "time"        : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+
 
 # 2. Bot Status
 @app.get("/status")
 async def get_status():
     try:
-        risk    = bot.order_mgr.risk
-        net     = risk.daily_profit - risk.daily_loss
-        
-        # Live prices
+        risk = bot.order_mgr.risk
+        net  = risk.daily_profit - risk.daily_loss
+
         try:
-            nifty  = bot.fetcher.get_live_price("NIFTY")
-            bn     = bot.fetcher.get_live_price("BANKNIFTY")
+            nifty = bot.fetcher.get_live_price("NIFTY")
+            bn    = bot.fetcher.get_live_price("BANKNIFTY")
         except:
-            nifty  = 0
-            bn     = 0
+            nifty = 0
+            bn    = 0
 
         return {
-            "status"       : "success",
-            "bot_running"  : bot.running,
-            "mode"         : TRADING["mode"],
-            "capital"      : risk.capital,
-            "daily_pnl"    : net,
-            "daily_profit" : risk.daily_profit,
-            "daily_loss"   : risk.daily_loss,
-            "trades_today" : risk.trades_today,
-            "max_trades"   : risk.max_trades,
-            "ai_accuracy"  : bot.model.accuracy,
-            "nifty_price"  : nifty,
-            "banknifty"    : bn,
-            "active_trades": len(risk.active_trades),
-            "data_loaded"  : bot.df is not None,
-            "timestamp"    : datetime.now().strftime(
-                             "%Y-%m-%d %H:%M:%S")
+            "status"        : "success",
+            "bot_running"   : bot.running,
+            "market_open"   : is_market_open(),
+            "mode"          : TRADING["mode"],
+            "capital"       : risk.capital,
+            "daily_pnl"     : net,
+            "daily_profit"  : risk.daily_profit,
+            "daily_loss"    : risk.daily_loss,
+            "trades_today"  : risk.trades_today,
+            "max_trades"    : risk.max_trades,
+            "ai_accuracy"   : bot.model.accuracy,
+            "nifty_price"   : nifty,
+            "banknifty"     : bn,
+            "active_trades" : len(risk.active_trades),
+            "data_loaded"   : bot.df is not None,
+            "data_rows"     : len(bot.df) if bot.df is not None else 0,
+            "last_signal"   : str(bot.last_signal),
+            "trade_count"   : bot.trade_count,
+            "timestamp"     : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -161,7 +360,7 @@ async def get_signal():
         if bot.df is None:
             return {
                 "status"  : "offline",
-                "message" : "Data nahi mila — reconnecting..."
+                "message" : "Data nahi mila!"
             }
 
         from indicators import Indicators
@@ -185,8 +384,8 @@ async def get_signal():
             "indicator_score"  : ind_signal["score"],
             "rsi"              : ind_signal["rsi"],
             "reasons"          : ind_signal["reasons"],
-            "timestamp"        : datetime.now().strftime(
-                                 "%Y-%m-%d %H:%M:%S")
+            "market_open"      : is_market_open(),
+            "timestamp"        : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -202,8 +401,7 @@ async def get_prices():
             "status"    : "success",
             "nifty"     : nifty,
             "banknifty" : bn,
-            "timestamp" : datetime.now().strftime(
-                          "%Y-%m-%d %H:%M:%S")
+            "timestamp" : datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -216,12 +414,17 @@ async def reconnect():
         def reconnect_bg():
             connected = bot.fetcher.connect()
             if connected:
-                bot.df = bot.fetcher.get_historical_data(
-                    "NIFTY", days=365
+                df = bot.fetcher.get_historical_data_yfinance(
+                    "NIFTY", years=5
                 )
-                if bot.df is not None:
-                    if not bot.model.is_trained:
-                        bot.model.train(bot.df)
+                if df is not None:
+                    bot.df = df
+                elif bot.df is None:
+                    bot.df = bot.fetcher.get_historical_data(
+                        "NIFTY", days=365
+                    )
+                if bot.df is not None and not bot.model.is_trained:
+                    bot.model.train(bot.df)
                 bot.running = True
                 print("✅ Reconnected!")
 
@@ -236,26 +439,21 @@ async def reconnect():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 6. Execute Trade
+# 6. Manual Trade Execute
 @app.post("/trade/execute")
 async def execute_trade(req: TradeRequest):
     try:
         if bot.df is None:
-            return {
-                "status"  : "error",
-                "message" : "Bot offline hai!"
-            }
+            return {"status": "error", "message": "Bot offline!"}
+
+        if not is_market_open():
+            return {"status": "error", "message": "Market band hai!"}
 
         signal = bot.model.predict(bot.df)
         if not signal:
-            raise HTTPException(
-                status_code=400,
-                detail="Signal nahi mila!"
-            )
+            raise HTTPException(status_code=400, detail="Signal nahi mila!")
 
-        order_id = bot.order_mgr.execute_signal(
-            signal, req.symbol
-        )
+        order_id = bot.order_mgr.execute_signal(signal, req.symbol)
 
         if order_id:
             return {
@@ -267,19 +465,32 @@ async def execute_trade(req: TradeRequest):
         else:
             return {
                 "status"  : "skipped",
-                "message" : "Trade conditions met nahi hui"
+                "message" : "Conditions met nahi hui"
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 7. Exit Trade
+# 7. Trade Now (Manual trigger)
+@app.post("/trade/now")
+async def trade_now():
+    try:
+        bot_trade()
+        return {
+            "status"      : "success",
+            "message"     : "Trade cycle executed!",
+            "trade_count" : bot.trade_count,
+            "market_open" : is_market_open()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 8. Exit Trade
 @app.post("/trade/exit/{order_id}")
 async def exit_trade(order_id: str):
     try:
-        result = bot.order_mgr.exit_trade(
-            order_id, "MANUAL_EXIT"
-        )
+        result = bot.order_mgr.exit_trade(order_id, "MANUAL_EXIT")
         return {
             "status"  : "success",
             "result"  : result,
@@ -289,13 +500,11 @@ async def exit_trade(order_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 8. Active Trades
+# 9. Active Trades
 @app.get("/trades/active")
 async def get_active_trades():
     try:
-        trades = list(
-            bot.order_mgr.risk.active_trades.values()
-        )
+        trades = list(bot.order_mgr.risk.active_trades.values())
         return {
             "status" : "success",
             "count"  : len(trades),
@@ -305,7 +514,7 @@ async def get_active_trades():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 9. Trade History
+# 10. Trade History
 @app.get("/trades/history")
 async def get_trade_history():
     try:
@@ -319,33 +528,32 @@ async def get_trade_history():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 10. Manual Train
+# 11. Manual Train
 @app.post("/train")
 async def manual_train():
     try:
         def train_bg():
-            if bot.fetcher.connected:
-                bot.df = bot.fetcher.get_historical_data(
-                    "NIFTY", days=365
-                )
+            df = bot.fetcher.get_historical_data_yfinance(
+                "NIFTY", years=5
+            )
+            if df is not None:
+                bot.df = df
             if bot.df is not None:
                 bot.model.train(bot.df)
                 print("✅ Training complete!")
-            else:
-                print("❌ Data nahi mila!")
 
         thread = threading.Thread(target=train_bg)
         thread.start()
 
         return {
             "status"  : "success",
-            "message" : "Training shuru!"
+            "message" : "Training shuru! 5 saal ka data se."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 11. Update Settings
+# 12. Update Settings
 @app.post("/settings")
 async def update_settings(s: SettingsUpdate):
     try:
@@ -368,7 +576,7 @@ async def update_settings(s: SettingsUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 12. Emergency Stop
+# 13. Emergency Stop
 @app.post("/emergency_stop")
 async def emergency_stop():
     try:
@@ -382,7 +590,7 @@ async def emergency_stop():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 13. Training History
+# 14. Training History
 @app.get("/training/history")
 async def training_history():
     try:
@@ -402,7 +610,6 @@ async def training_history():
 if __name__ == "__main__":
     print("🚀 TITAN-AI SERVER STARTING...")
     print("   URL: http://localhost:8000")
-    print("   Docs: http://localhost:8000/docs")
     uvicorn.run(
         "api_server:app",
         host   = "0.0.0.0",

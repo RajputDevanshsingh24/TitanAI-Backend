@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — Data Fetcher v4.0
+# TITAN-AI TRADER — Data Fetcher v5.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -8,6 +8,7 @@ import pyotp
 import pandas as pd
 import time
 import os
+import yfinance as yf
 from datetime import datetime, timedelta
 
 class DataFetcher:
@@ -17,40 +18,35 @@ class DataFetcher:
         self.connected = False
 
     # ============================================
-    # CONNECT
+    # ANGEL ONE CONNECT
     # ============================================
     def connect(self):
         try:
             print("🔌 Connecting to Angel One...")
 
-            # Seedha os.environ se lo
             api_key  = os.environ.get("ANGEL_API_KEY", "")
             client   = os.environ.get("ANGEL_CLIENT_ID", "AACG329697")
             password = os.environ.get("ANGEL_PASSWORD", "")
             totp_key = os.environ.get("ANGEL_TOTP_KEY", "")
 
-            # Debug print
             print(f"   API Key:  {api_key[:4] if api_key else 'EMPTY'}****")
             print(f"   Client:   {client}")
             print(f"   Password: {'SET ✅' if password else 'EMPTY ❌'}")
             print(f"   TOTP Key: {'SET ✅' if totp_key else 'EMPTY ❌'}")
 
-            # Validation
             if not api_key:
-                print("❌ ANGEL_API_KEY missing in Railway!")
+                print("❌ ANGEL_API_KEY missing!")
                 return False
             if not password:
-                print("❌ ANGEL_PASSWORD missing in Railway!")
+                print("❌ ANGEL_PASSWORD missing!")
                 return False
             if not totp_key:
-                print("❌ ANGEL_TOTP_KEY missing in Railway!")
+                print("❌ ANGEL_TOTP_KEY missing!")
                 return False
 
-            # TOTP generate
-            totp = pyotp.TOTP(totp_key).now()
-            print(f"   TOTP Code: {totp}")
+            totp     = pyotp.TOTP(totp_key).now()
+            print(f"   TOTP:     {totp}")
 
-            # Login
             self.api = SmartConnect(api_key=api_key)
             data     = self.api.generateSession(
                 client, password, totp
@@ -69,7 +65,7 @@ class DataFetcher:
             return False
 
     # ============================================
-    # LIVE PRICE
+    # LIVE PRICE — ANGEL ONE
     # ============================================
     def get_live_price(self, symbol="NIFTY"):
         try:
@@ -89,11 +85,72 @@ class DataFetcher:
             return price
 
         except Exception as e:
-            print(f"❌ Price Error: {e}")
+            print(f"❌ Live Price Error: {e}")
             return None
 
     # ============================================
-    # BATCH DATA
+    # HISTORICAL DATA — YFINANCE (5 SAAL) ⭐
+    # ============================================
+    def get_historical_data_yfinance(self, 
+                                      symbol="NIFTY", 
+                                      years=5):
+        try:
+            # NSE Symbols
+            symbols = {
+                "NIFTY"    : "^NSEI",
+                "BANKNIFTY": "^NSEBANK"
+            }
+
+            ticker = symbols.get(symbol, "^NSEI")
+
+            print(f"📊 yfinance se {years} saal ka "
+                  f"data fetch ho raha hai...")
+            print(f"   Symbol: {ticker}")
+
+            # Data download karo
+            df = yf.download(
+                ticker,
+                period   = f"{years}y",
+                progress = False,
+                auto_adjust = True
+            )
+
+            if df.empty:
+                print("❌ yfinance se data nahi mila!")
+                return None
+
+            # Column names fix karo
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]
+
+            # Sirf OHLCV rakho
+            df = df[["Open", "High", "Low", 
+                     "Close", "Volume"]]
+            df = df.dropna()
+            df = df.sort_index()
+
+            # Volume 0 fix
+            df["Volume"] = df["Volume"].replace(0, 1)
+
+            print(f"✅ yfinance: {len(df)} din ka data ready!")
+            print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
+            print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
+
+            # CSV save
+            try:
+                df.to_csv(f"{symbol}_yfinance.csv")
+                print(f"💾 Saved: {symbol}_yfinance.csv")
+            except:
+                pass
+
+            return df
+
+        except Exception as e:
+            print(f"❌ yfinance Error: {e}")
+            return None
+
+    # ============================================
+    # HISTORICAL DATA — ANGEL ONE (Backup)
     # ============================================
     def _fetch_batch(self, token, from_date, to_date):
         try:
@@ -101,8 +158,10 @@ class DataFetcher:
                 "exchange"    : "NSE",
                 "symboltoken" : token,
                 "interval"    : "ONE_DAY",
-                "fromdate"    : from_date.strftime("%Y-%m-%d 09:00"),
-                "todate"      : to_date.strftime("%Y-%m-%d 15:30")
+                "fromdate"    : from_date.strftime(
+                                "%Y-%m-%d 09:00"),
+                "todate"      : to_date.strftime(
+                                "%Y-%m-%d 15:30")
             }
             data = self.api.getCandleData(params)
             if data["status"] and data["data"]:
@@ -112,15 +171,14 @@ class DataFetcher:
             print(f"❌ Batch Error: {e}")
             return []
 
-    # ============================================
-    # HISTORICAL DATA
-    # ============================================
-    def get_historical_data(self, symbol="NIFTY", days=365):
+    def get_historical_data(self, 
+                             symbol="NIFTY", 
+                             days=365):
         try:
             if not self.connected:
                 success = self.connect()
                 if not success:
-                    print("❌ Connect fail — data nahi milega!")
+                    print("❌ Connect fail!")
                     return None
 
             tokens = {
@@ -132,13 +190,15 @@ class DataFetcher:
             end_date   = datetime.now()
             start_date = end_date - timedelta(days=days)
 
-            print(f"📅 {days} din ka data fetch ho raha hai...")
+            print(f"📅 Angel One se {days} din ka data...")
 
             chunk_days  = 90
             current_end = end_date
 
             while current_end > start_date:
-                current_start = current_end - timedelta(days=chunk_days)
+                current_start = current_end - timedelta(
+                    days=chunk_days
+                )
                 if current_start < start_date:
                     current_start = start_date
 
@@ -147,7 +207,7 @@ class DataFetcher:
                 )
                 if batch:
                     all_data = batch + all_data
-                    print(f"   ✅ {len(batch)} rows fetched")
+                    print(f"   ✅ {len(batch)} rows")
 
                 current_end = current_start - timedelta(days=1)
                 time.sleep(0.5)
@@ -158,20 +218,57 @@ class DataFetcher:
 
             df = pd.DataFrame(
                 all_data,
-                columns=["Date","Open","High","Low","Close","Volume"]
+                columns=["Date","Open","High",
+                         "Low","Close","Volume"]
             )
             df["Date"]   = pd.to_datetime(df["Date"])
             df           = df.sort_values("Date")
-            df           = df.drop_duplicates(subset=["Date"])
+            df           = df.drop_duplicates(
+                           subset=["Date"])
             df.set_index("Date", inplace=True)
             df["Volume"] = df["Volume"].replace(0, 1)
 
-            print(f"✅ Total {len(df)} din ka data ready!")
+            print(f"✅ Angel One: {len(df)} din ka data!")
             return df
 
         except Exception as e:
             print(f"❌ Historical Data Error: {e}")
             return None
+
+    # ============================================
+    # SMART DATA FETCH (yfinance + Angel One)
+    # ============================================
+    def get_best_data(self, symbol="NIFTY", years=5):
+        """
+        Pehle yfinance try karo (5 saal)
+        Fail hone pe Angel One se lo (1 saal)
+        """
+        print(f"🔍 Best data fetch kar raha hun...")
+
+        # Try 1: yfinance (5 saal)
+        df = self.get_historical_data_yfinance(
+            symbol, years
+        )
+
+        if df is not None and len(df) > 100:
+            print(f"✅ yfinance data use kar raha hun "
+                  f"({len(df)} rows)")
+            return df
+
+        # Try 2: Angel One (1 saal)
+        print("⚠️ yfinance failed — Angel One try kar raha hun...")
+        if not self.connected:
+            self.connect()
+
+        df = self.get_historical_data(symbol, days=365)
+
+        if df is not None:
+            print(f"✅ Angel One data use kar raha hun "
+                  f"({len(df)} rows)")
+            return df
+
+        print("❌ Dono sources fail ho gaye!")
+        return None
 
     # ============================================
     # INTRADAY DATA
@@ -193,8 +290,10 @@ class DataFetcher:
                 "exchange"    : "NSE",
                 "symboltoken" : token,
                 "interval"    : "FIVE_MINUTE",
-                "fromdate"    : start.strftime("%Y-%m-%d 09:00"),
-                "todate"      : end.strftime("%Y-%m-%d 15:30")
+                "fromdate"    : start.strftime(
+                                "%Y-%m-%d 09:00"),
+                "todate"      : end.strftime(
+                                "%Y-%m-%d 15:30")
             }
             data = self.api.getCandleData(params)
 
@@ -219,7 +318,11 @@ class DataFetcher:
 # TEST
 # ============================================
 if __name__ == "__main__":
-    # Local test ke liye hardcode
+    print("="*50)
+    print("🧪 DATA FETCHER TEST v5.0")
+    print("="*50)
+
+    # Local test credentials
     os.environ["ANGEL_API_KEY"]    = "mB3Hghfu"
     os.environ["ANGEL_SECRET_KEY"] = "36e27781-9351-4fbf-8143-973c0219b976"
     os.environ["ANGEL_CLIENT_ID"]  = "AACG329697"
@@ -227,8 +330,18 @@ if __name__ == "__main__":
     os.environ["ANGEL_TOTP_KEY"]   = "TOTP_KEY_YAHAN"
 
     fetcher = DataFetcher()
+
+    # yfinance test
+    print("\n--- yfinance Test ---")
+    df = fetcher.get_historical_data_yfinance(
+        "NIFTY", years=5
+    )
+    if df is not None:
+        print(f"Rows: {len(df)}")
+        print(df.tail(3))
+
+    # Angel One test
+    print("\n--- Angel One Test ---")
     if fetcher.connect():
         fetcher.get_live_price("NIFTY")
-        df = fetcher.get_historical_data("NIFTY", days=100)
-        if df is not None:
-            print(df.tail())
+        fetcher.get_live_price("BANKNIFTY")
