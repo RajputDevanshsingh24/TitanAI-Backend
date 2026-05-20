@@ -1,14 +1,14 @@
 # ============================================
-# TITAN-AI TRADER — Data Fetcher v5.0
+# TITAN-AI TRADER — Data Fetcher FINAL
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
 from SmartApi import SmartConnect
 import pyotp
 import pandas as pd
-import time
+import requests
 import os
-import yfinance as yf
+import time
 from datetime import datetime, timedelta
 
 class DataFetcher:
@@ -16,9 +16,16 @@ class DataFetcher:
     def __init__(self):
         self.api       = None
         self.connected = False
+        
+        # GitHub raw CSV URL
+        self.github_csv = (
+            "https://raw.githubusercontent.com/"
+            "RajputDevanshsingh24/TitanAI-Backend/"
+            "main/nifty_data.csv"
+        )
 
     # ============================================
-    # ANGEL ONE CONNECT
+    # CONNECT — ANGEL ONE
     # ============================================
     def connect(self):
         try:
@@ -34,14 +41,8 @@ class DataFetcher:
             print(f"   Password: {'SET ✅' if password else 'EMPTY ❌'}")
             print(f"   TOTP Key: {'SET ✅' if totp_key else 'EMPTY ❌'}")
 
-            if not api_key:
-                print("❌ ANGEL_API_KEY missing!")
-                return False
-            if not password:
-                print("❌ ANGEL_PASSWORD missing!")
-                return False
-            if not totp_key:
-                print("❌ ANGEL_TOTP_KEY missing!")
+            if not api_key or not password or not totp_key:
+                print("❌ Credentials missing!")
                 return False
 
             totp     = pyotp.TOTP(totp_key).now()
@@ -89,68 +90,161 @@ class DataFetcher:
             return None
 
     # ============================================
-    # HISTORICAL DATA — YFINANCE (5 SAAL) ⭐
+    # METHOD 1: GITHUB CSV (PRIMARY — 10 SAAL)
     # ============================================
-    def get_historical_data_yfinance(self, 
-                                      symbol="NIFTY", 
-                                      years=5):
+    def get_data_from_github(self):
         try:
-            # NSE Symbols
-            symbols = {
-                "NIFTY"    : "^NSEI",
-                "BANKNIFTY": "^NSEBANK"
-            }
+            print("📊 GitHub CSV se data load ho raha hai...")
+            print(f"   URL: {self.github_csv}")
 
-            ticker = symbols.get(symbol, "^NSEI")
-
-            print(f"📊 yfinance se {years} saal ka "
-                  f"data fetch ho raha hai...")
-            print(f"   Symbol: {ticker}")
-
-            # Data download karo
-            df = yf.download(
-                ticker,
-                period   = f"{years}y",
-                progress = False,
-                auto_adjust = True
+            response = requests.get(
+                self.github_csv,
+                timeout=15
             )
 
-            if df.empty:
-                print("❌ yfinance se data nahi mila!")
+            if response.status_code != 200:
+                print(f"❌ GitHub error: {response.status_code}")
                 return None
 
-            # Column names fix karo
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0] for col in df.columns]
+            from io import StringIO
+            df = pd.read_csv(StringIO(response.text))
+
+            # Column names normalize karo
+            df.columns = [c.strip().title() 
+                         for c in df.columns]
+
+            # Date column find karo
+            date_col = None
+            for col in df.columns:
+                if 'date' in col.lower():
+                    date_col = col
+                    break
+
+            if date_col is None:
+                print("❌ Date column nahi mila!")
+                return None
+
+            df[date_col] = pd.to_datetime(
+                df[date_col], dayfirst=True
+            )
+            df.set_index(date_col, inplace=True)
+            df.index.name = "Date"
+
+            # OHLCV columns find karo
+            col_map = {}
+            for col in df.columns:
+                cl = col.lower()
+                if 'open' in cl:
+                    col_map[col] = 'Open'
+                elif 'high' in cl:
+                    col_map[col] = 'High'
+                elif 'low' in cl:
+                    col_map[col] = 'Low'
+                elif 'close' in cl:
+                    col_map[col] = 'Close'
+                elif 'volume' in cl:
+                    col_map[col] = 'Volume'
+
+            df = df.rename(columns=col_map)
+
+            # Volume nahi hai toh add karo
+            if 'Volume' not in df.columns:
+                df['Volume'] = 1
 
             # Sirf OHLCV rakho
-            df = df[["Open", "High", "Low", 
-                     "Close", "Volume"]]
+            available = [c for c in 
+                        ['Open','High','Low','Close','Volume']
+                        if c in df.columns]
+            df = df[available]
+
+            # Commas hatao numbers se
+            for col in df.columns:
+                if df[col].dtype == object:
+                    df[col] = df[col].astype(str)\
+                              .str.replace(',', '')\
+                              .str.replace(' ', '')
+                    df[col] = pd.to_numeric(
+                        df[col], errors='coerce'
+                    )
+
             df = df.dropna()
             df = df.sort_index()
 
-            # Volume 0 fix
-            df["Volume"] = df["Volume"].replace(0, 1)
-
-            print(f"✅ yfinance: {len(df)} din ka data ready!")
+            print(f"✅ GitHub CSV: {len(df)} din ka data!")
             print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
             print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
-
-            # CSV save
-            try:
-                df.to_csv(f"{symbol}_yfinance.csv")
-                print(f"💾 Saved: {symbol}_yfinance.csv")
-            except:
-                pass
 
             return df
 
         except Exception as e:
-            print(f"❌ yfinance Error: {e}")
+            print(f"❌ GitHub CSV Error: {e}")
             return None
 
     # ============================================
-    # HISTORICAL DATA — ANGEL ONE (Backup)
+    # METHOD 2: STOOQ (BACKUP — AUTO)
+    # ============================================
+    def get_data_from_stooq(self, years=5):
+        try:
+            print("📊 Stooq se data fetch ho raha hai...")
+
+            from datetime import datetime, timedelta
+            end   = datetime.now()
+            start = end - timedelta(days=years*365)
+
+            url = (
+                f"https://stooq.com/q/d/l/"
+                f"?s=%5Ensep"
+                f"&d1={start.strftime('%Y%m%d')}"
+                f"&d2={end.strftime('%Y%m%d')}"
+                f"&i=d"
+            )
+
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(
+                url, headers=headers, timeout=15
+            )
+
+            if response.status_code != 200:
+                print(f"❌ Stooq error: {response.status_code}")
+                return None
+
+            from io import StringIO
+            df = pd.read_csv(StringIO(response.text))
+
+            if df.empty or len(df) < 100:
+                print("❌ Stooq: Kafi data nahi mila!")
+                return None
+
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
+
+            # Rename columns
+            df = df.rename(columns={
+                'Open' : 'Open',
+                'High' : 'High',
+                'Low'  : 'Low',
+                'Close': 'Close',
+            })
+
+            if 'Volume' not in df.columns:
+                df['Volume'] = 1
+
+            df = df[['Open','High','Low','Close','Volume']]
+            df = df.dropna()
+            df = df.sort_index()
+
+            print(f"✅ Stooq: {len(df)} din ka data!")
+            print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
+            print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
+
+            return df
+
+        except Exception as e:
+            print(f"❌ Stooq Error: {e}")
+            return None
+
+    # ============================================
+    # METHOD 3: ANGEL ONE (FALLBACK — 1 SAAL)
     # ============================================
     def _fetch_batch(self, token, from_date, to_date):
         try:
@@ -171,14 +265,13 @@ class DataFetcher:
             print(f"❌ Batch Error: {e}")
             return []
 
-    def get_historical_data(self, 
-                             symbol="NIFTY", 
+    def get_historical_data(self,
+                             symbol="NIFTY",
                              days=365):
         try:
             if not self.connected:
                 success = self.connect()
                 if not success:
-                    print("❌ Connect fail!")
                     return None
 
             tokens = {
@@ -213,7 +306,7 @@ class DataFetcher:
                 time.sleep(0.5)
 
             if not all_data:
-                print("❌ Koi data nahi mila!")
+                print("❌ Angel One: Data nahi mila!")
                 return None
 
             df = pd.DataFrame(
@@ -236,44 +329,53 @@ class DataFetcher:
             return None
 
     # ============================================
-    # SMART DATA FETCH (yfinance + Angel One)
+    # MASTER FUNCTION — BEST DATA LO
     # ============================================
-    def get_best_data(self, symbol="NIFTY", years=5):
+    def get_best_data(self, symbol="NIFTY"):
         """
-        Pehle yfinance try karo (5 saal)
-        Fail hone pe Angel One se lo (1 saal)
+        Priority order:
+        1. GitHub CSV (10 saal — manually uploaded)
+        2. Stooq (5 saal — auto)
+        3. Angel One (1 saal — fallback)
         """
-        print(f"🔍 Best data fetch kar raha hun...")
+        print("\n" + "="*45)
+        print("🔍 BEST DATA SOURCE DHUND RAHA HUN")
+        print("="*45)
 
-        # Try 1: yfinance (5 saal)
-        df = self.get_historical_data_yfinance(
-            symbol, years
-        )
-
-        if df is not None and len(df) > 100:
-            print(f"✅ yfinance data use kar raha hun "
-                  f"({len(df)} rows)")
+        # Priority 1: GitHub CSV
+        df = self.get_data_from_github()
+        if df is not None and len(df) > 500:
+            print(f"🏆 GitHub CSV use kar raha hun!")
+            print(f"   Rows: {len(df)} ✅")
             return df
 
-        # Try 2: Angel One (1 saal)
-        print("⚠️ yfinance failed — Angel One try kar raha hun...")
+        # Priority 2: Stooq
+        print("⚠️ GitHub failed — Stooq try...")
+        df = self.get_data_from_stooq(years=5)
+        if df is not None and len(df) > 500:
+            print(f"🏆 Stooq use kar raha hun!")
+            print(f"   Rows: {len(df)} ✅")
+            return df
+
+        # Priority 3: Angel One
+        print("⚠️ Stooq failed — Angel One fallback...")
         if not self.connected:
             self.connect()
-
         df = self.get_historical_data(symbol, days=365)
-
         if df is not None:
-            print(f"✅ Angel One data use kar raha hun "
-                  f"({len(df)} rows)")
+            print(f"🏆 Angel One use kar raha hun!")
+            print(f"   Rows: {len(df)} ✅")
             return df
 
-        print("❌ Dono sources fail ho gaye!")
+        print("❌ Koi bhi source kaam nahi kar raha!")
         return None
 
     # ============================================
     # INTRADAY DATA
     # ============================================
-    def get_intraday_data(self, symbol="NIFTY", days=5):
+    def get_intraday_data(self,
+                           symbol="NIFTY",
+                           days=5):
         try:
             if not self.connected:
                 self.connect()
@@ -319,29 +421,16 @@ class DataFetcher:
 # ============================================
 if __name__ == "__main__":
     print("="*50)
-    print("🧪 DATA FETCHER TEST v5.0")
+    print("🧪 DATA FETCHER FINAL TEST")
     print("="*50)
-
-    # Local test credentials
-    os.environ["ANGEL_API_KEY"]    = "mB3Hghfu"
-    os.environ["ANGEL_SECRET_KEY"] = "36e27781-9351-4fbf-8143-973c0219b976"
-    os.environ["ANGEL_CLIENT_ID"]  = "AACG329697"
-    os.environ["ANGEL_PASSWORD"]   = "4160"
-    os.environ["ANGEL_TOTP_KEY"]   = "TOTP_KEY_YAHAN"
 
     fetcher = DataFetcher()
 
-    # yfinance test
-    print("\n--- yfinance Test ---")
-    df = fetcher.get_historical_data_yfinance(
-        "NIFTY", years=5
-    )
+    # Best data test
+    df = fetcher.get_best_data("NIFTY")
     if df is not None:
-        print(f"Rows: {len(df)}")
+        print(f"\n✅ Final Result:")
+        print(f"   Rows:  {len(df)}")
+        print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
+        print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
         print(df.tail(3))
-
-    # Angel One test
-    print("\n--- Angel One Test ---")
-    if fetcher.connect():
-        fetcher.get_live_price("NIFTY")
-        fetcher.get_live_price("BANKNIFTY")
