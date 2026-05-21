@@ -30,7 +30,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Force redeploy 21-05-2026
+
 # ============================================
+
 # BOT STATE
 # ============================================
 class BotState:
