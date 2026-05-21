@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — Data Fetcher FINAL
+# TITAN-AI TRADER — Data Fetcher FINAL v6.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -14,10 +14,10 @@ from datetime import datetime, timedelta
 class DataFetcher:
 
     def __init__(self):
-        self.api       = None
-        self.connected = False
-        
-        # GitHub raw CSV URL
+        self.api        = None
+        self.connected  = False
+
+        # GitHub CSV URL — 10 saal ka data
         self.github_csv = (
             "https://raw.githubusercontent.com/"
             "RajputDevanshsingh24/TitanAI-Backend/"
@@ -25,24 +25,33 @@ class DataFetcher:
         )
 
     # ============================================
-    # CONNECT — ANGEL ONE
+    # ANGEL ONE — CONNECT
     # ============================================
     def connect(self):
         try:
             print("🔌 Connecting to Angel One...")
 
-            api_key  = os.environ.get("ANGEL_API_KEY", "")
-            client   = os.environ.get("ANGEL_CLIENT_ID", "AACG329697")
+            api_key  = os.environ.get("ANGEL_API_KEY",  "")
+            client   = os.environ.get("ANGEL_CLIENT_ID","AACG329697")
             password = os.environ.get("ANGEL_PASSWORD", "")
             totp_key = os.environ.get("ANGEL_TOTP_KEY", "")
 
-            print(f"   API Key:  {api_key[:4] if api_key else 'EMPTY'}****")
+            print(f"   API Key:  "
+                  f"{api_key[:4] if api_key else 'EMPTY'}****")
             print(f"   Client:   {client}")
-            print(f"   Password: {'SET ✅' if password else 'EMPTY ❌'}")
-            print(f"   TOTP Key: {'SET ✅' if totp_key else 'EMPTY ❌'}")
+            print(f"   Password: "
+                  f"{'SET ✅' if password else 'EMPTY ❌'}")
+            print(f"   TOTP Key: "
+                  f"{'SET ✅' if totp_key else 'EMPTY ❌'}")
 
-            if not api_key or not password or not totp_key:
-                print("❌ Credentials missing!")
+            if not api_key:
+                print("❌ ANGEL_API_KEY missing!")
+                return False
+            if not password:
+                print("❌ ANGEL_PASSWORD missing!")
+                return False
+            if not totp_key:
+                print("❌ ANGEL_TOTP_KEY missing!")
                 return False
 
             totp     = pyotp.TOTP(totp_key).now()
@@ -74,9 +83,16 @@ class DataFetcher:
                 self.connect()
 
             symbols = {
-                "NIFTY"    : {"token": "99926000", "exchange": "NSE"},
-                "BANKNIFTY": {"token": "99926009", "exchange": "NSE"},
+                "NIFTY"    : {
+                    "token"   : "99926000",
+                    "exchange": "NSE"
+                },
+                "BANKNIFTY": {
+                    "token"   : "99926009",
+                    "exchange": "NSE"
+                },
             }
+
             s     = symbols[symbol]
             data  = self.api.ltpData(
                 s["exchange"], symbol, s["token"]
@@ -90,7 +106,7 @@ class DataFetcher:
             return None
 
     # ============================================
-    # METHOD 1: GITHUB CSV (PRIMARY — 10 SAAL)
+    # METHOD 1: GITHUB CSV — PRIMARY (10 SAAL)
     # ============================================
     def get_data_from_github(self):
         try:
@@ -99,80 +115,73 @@ class DataFetcher:
 
             response = requests.get(
                 self.github_csv,
-                timeout=15
+                timeout = 20,
+                headers = {"User-Agent": "Mozilla/5.0"}
             )
 
             if response.status_code != 200:
-                print(f"❌ GitHub error: {response.status_code}")
+                print(f"❌ GitHub HTTP Error: "
+                      f"{response.status_code}")
                 return None
 
             from io import StringIO
-            df = pd.read_csv(StringIO(response.text))
+            content = response.text.strip()
 
-            # Column names normalize karo
-            df.columns = [c.strip().title() 
-                         for c in df.columns]
-
-            # Date column find karo
-            date_col = None
-            for col in df.columns:
-                if 'date' in col.lower():
-                    date_col = col
-                    break
-
-            if date_col is None:
-                print("❌ Date column nahi mila!")
+            if len(content) < 100:
+                print("❌ GitHub: Empty response!")
                 return None
 
-            df[date_col] = pd.to_datetime(
-                df[date_col], dayfirst=True
+            # CSV parse karo
+            # Format:
+            # Date,Close,High,Low,Open,Volume
+            # 2016-05-20,7749.7,7812.4,...
+            df = pd.read_csv(
+                StringIO(content),
+                header = 0
             )
-            df.set_index(date_col, inplace=True)
-            df.index.name = "Date"
 
-            # OHLCV columns find karo
-            col_map = {}
-            for col in df.columns:
-                cl = col.lower()
-                if 'open' in cl:
-                    col_map[col] = 'Open'
-                elif 'high' in cl:
-                    col_map[col] = 'High'
-                elif 'low' in cl:
-                    col_map[col] = 'Low'
-                elif 'close' in cl:
-                    col_map[col] = 'Close'
-                elif 'volume' in cl:
-                    col_map[col] = 'Volume'
+            # Columns verify karo
+            required = ['Date','Close','High',
+                       'Low','Open','Volume']
+            missing  = [c for c in required
+                       if c not in df.columns]
 
-            df = df.rename(columns=col_map)
+            if missing:
+                print(f"❌ Missing columns: {missing}")
+                print(f"   Available: {list(df.columns)}")
+                return None
 
-            # Volume nahi hai toh add karo
-            if 'Volume' not in df.columns:
-                df['Volume'] = 1
+            # Date parse karo
+            df['Date'] = pd.to_datetime(
+                df['Date'], errors='coerce'
+            )
+            df = df.dropna(subset=['Date'])
+            df = df.set_index('Date')
+            df.index.name = 'Date'
 
-            # Sirf OHLCV rakho
-            available = [c for c in 
-                        ['Open','High','Low','Close','Volume']
-                        if c in df.columns]
-            df = df[available]
+            # Numeric convert karo
+            for col in ['Open','High','Low',
+                        'Close','Volume']:
+                df[col] = pd.to_numeric(
+                    df[col], errors='coerce'
+                )
 
-            # Commas hatao numbers se
-            for col in df.columns:
-                if df[col].dtype == object:
-                    df[col] = df[col].astype(str)\
-                              .str.replace(',', '')\
-                              .str.replace(' ', '')
-                    df[col] = pd.to_numeric(
-                        df[col], errors='coerce'
-                    )
-
+            # Clean karo
             df = df.dropna()
             df = df.sort_index()
 
-            print(f"✅ GitHub CSV: {len(df)} din ka data!")
-            print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
-            print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
+            # Volume 0 fix
+            df['Volume'] = df['Volume'].replace(0, 1)
+
+            # Duplicate dates hatao
+            df = df[~df.index.duplicated(keep='last')]
+
+            row_count = len(df)
+            print(f"✅ GitHub CSV: {row_count} din ka data!")
+            print(f"   Start: "
+                  f"{df.index[0].strftime('%Y-%m-%d')}")
+            print(f"   End:   "
+                  f"{df.index[-1].strftime('%Y-%m-%d')}")
 
             return df
 
@@ -181,70 +190,7 @@ class DataFetcher:
             return None
 
     # ============================================
-    # METHOD 2: STOOQ (BACKUP — AUTO)
-    # ============================================
-    def get_data_from_stooq(self, years=5):
-        try:
-            print("📊 Stooq se data fetch ho raha hai...")
-
-            from datetime import datetime, timedelta
-            end   = datetime.now()
-            start = end - timedelta(days=years*365)
-
-            url = (
-                f"https://stooq.com/q/d/l/"
-                f"?s=%5Ensep"
-                f"&d1={start.strftime('%Y%m%d')}"
-                f"&d2={end.strftime('%Y%m%d')}"
-                f"&i=d"
-            )
-
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(
-                url, headers=headers, timeout=15
-            )
-
-            if response.status_code != 200:
-                print(f"❌ Stooq error: {response.status_code}")
-                return None
-
-            from io import StringIO
-            df = pd.read_csv(StringIO(response.text))
-
-            if df.empty or len(df) < 100:
-                print("❌ Stooq: Kafi data nahi mila!")
-                return None
-
-            df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
-
-            # Rename columns
-            df = df.rename(columns={
-                'Open' : 'Open',
-                'High' : 'High',
-                'Low'  : 'Low',
-                'Close': 'Close',
-            })
-
-            if 'Volume' not in df.columns:
-                df['Volume'] = 1
-
-            df = df[['Open','High','Low','Close','Volume']]
-            df = df.dropna()
-            df = df.sort_index()
-
-            print(f"✅ Stooq: {len(df)} din ka data!")
-            print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
-            print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
-
-            return df
-
-        except Exception as e:
-            print(f"❌ Stooq Error: {e}")
-            return None
-
-    # ============================================
-    # METHOD 3: ANGEL ONE (FALLBACK — 1 SAAL)
+    # METHOD 2: ANGEL ONE — FALLBACK (1 SAAL)
     # ============================================
     def _fetch_batch(self, token, from_date, to_date):
         try:
@@ -272,12 +218,14 @@ class DataFetcher:
             if not self.connected:
                 success = self.connect()
                 if not success:
+                    print("❌ Angel One connect fail!")
                     return None
 
             tokens = {
                 "NIFTY"    : "99926000",
                 "BANKNIFTY": "99926009",
             }
+
             token      = tokens[symbol]
             all_data   = []
             end_date   = datetime.now()
@@ -302,7 +250,9 @@ class DataFetcher:
                     all_data = batch + all_data
                     print(f"   ✅ {len(batch)} rows")
 
-                current_end = current_start - timedelta(days=1)
+                current_end = current_start - timedelta(
+                    days=1
+                )
                 time.sleep(0.5)
 
             if not all_data:
@@ -314,14 +264,21 @@ class DataFetcher:
                 columns=["Date","Open","High",
                          "Low","Close","Volume"]
             )
+
             df["Date"]   = pd.to_datetime(df["Date"])
             df           = df.sort_values("Date")
             df           = df.drop_duplicates(
                            subset=["Date"])
             df.set_index("Date", inplace=True)
             df["Volume"] = df["Volume"].replace(0, 1)
+            df           = df.dropna()
 
             print(f"✅ Angel One: {len(df)} din ka data!")
+            print(f"   Start: "
+                  f"{df.index[0].strftime('%Y-%m-%d')}")
+            print(f"   End:   "
+                  f"{df.index[-1].strftime('%Y-%m-%d')}")
+
             return df
 
         except Exception as e:
@@ -329,45 +286,40 @@ class DataFetcher:
             return None
 
     # ============================================
-    # MASTER FUNCTION — BEST DATA LO
+    # MASTER — BEST DATA LO
     # ============================================
     def get_best_data(self, symbol="NIFTY"):
         """
-        Priority order:
-        1. GitHub CSV (10 saal — manually uploaded)
-        2. Stooq (5 saal — auto)
-        3. Angel One (1 saal — fallback)
+        Priority:
+        1. GitHub CSV  → 2464 rows (10 saal) ⭐
+        2. Angel One   → 365 rows  (1 saal)
         """
         print("\n" + "="*45)
         print("🔍 BEST DATA SOURCE DHUND RAHA HUN")
         print("="*45)
 
-        # Priority 1: GitHub CSV
+        # Priority 1: GitHub CSV (10 saal)
+        print("\n[1/2] GitHub CSV try kar raha hun...")
         df = self.get_data_from_github()
-        if df is not None and len(df) > 500:
-            print(f"🏆 GitHub CSV use kar raha hun!")
+
+        if df is not None and len(df) > 200:
+            print(f"\n🏆 GitHub CSV selected!")
             print(f"   Rows: {len(df)} ✅")
             return df
 
-        # Priority 2: Stooq
-        print("⚠️ GitHub failed — Stooq try...")
-        df = self.get_data_from_stooq(years=5)
-        if df is not None and len(df) > 500:
-            print(f"🏆 Stooq use kar raha hun!")
-            print(f"   Rows: {len(df)} ✅")
-            return df
-
-        # Priority 3: Angel One
-        print("⚠️ Stooq failed — Angel One fallback...")
+        # Priority 2: Angel One (1 saal)
+        print("\n[2/2] Angel One fallback...")
         if not self.connected:
             self.connect()
+
         df = self.get_historical_data(symbol, days=365)
+
         if df is not None:
-            print(f"🏆 Angel One use kar raha hun!")
+            print(f"\n🏆 Angel One selected!")
             print(f"   Rows: {len(df)} ✅")
             return df
 
-        print("❌ Koi bhi source kaam nahi kar raha!")
+        print("\n❌ Koi bhi source kaam nahi kar raha!")
         return None
 
     # ============================================
@@ -384,6 +336,7 @@ class DataFetcher:
                 "NIFTY"    : "99926000",
                 "BANKNIFTY": "99926009",
             }
+
             token = tokens[symbol]
             end   = datetime.now()
             start = end - timedelta(days=days)
@@ -397,6 +350,7 @@ class DataFetcher:
                 "todate"      : end.strftime(
                                 "%Y-%m-%d 15:30")
             }
+
             data = self.api.getCandleData(params)
 
             if data["status"] and data["data"]:
@@ -409,6 +363,7 @@ class DataFetcher:
                 df.set_index("Date", inplace=True)
                 print(f"✅ Intraday: {len(df)} candles!")
                 return df
+
             return None
 
         except Exception as e:
@@ -420,17 +375,36 @@ class DataFetcher:
 # TEST
 # ============================================
 if __name__ == "__main__":
-    print("="*50)
-    print("🧪 DATA FETCHER FINAL TEST")
-    print("="*50)
+    print("=" * 50)
+    print("🧪 DATA FETCHER FINAL TEST v6.0")
+    print("=" * 50)
+
+    # Local test ke liye credentials
+    os.environ["ANGEL_API_KEY"]    = "mB3Hghfu"
+    os.environ["ANGEL_SECRET_KEY"] = "36e27781-9351-4fbf-8143-973c0219b976"
+    os.environ["ANGEL_CLIENT_ID"]  = "AACG329697"
+    os.environ["ANGEL_PASSWORD"]   = "4160"
+    os.environ["ANGEL_TOTP_KEY"]   = "APNA_TOTP_KEY_YAHAN"
 
     fetcher = DataFetcher()
 
     # Best data test
+    print("\n--- Best Data Test ---")
     df = fetcher.get_best_data("NIFTY")
+
     if df is not None:
-        print(f"\n✅ Final Result:")
-        print(f"   Rows:  {len(df)}")
-        print(f"   Start: {df.index[0].strftime('%Y-%m-%d')}")
-        print(f"   End:   {df.index[-1].strftime('%Y-%m-%d')}")
-        print(df.tail(3))
+        print(f"\n✅ FINAL RESULT:")
+        print(f"   Rows:    {len(df)}")
+        print(f"   Columns: {list(df.columns)}")
+        print(f"   Start:   {df.index[0].strftime('%Y-%m-%d')}")
+        print(f"   End:     {df.index[-1].strftime('%Y-%m-%d')}")
+        print(f"\n📋 Last 5 rows:")
+        print(df.tail(5))
+    else:
+        print("❌ Data fetch failed!")
+
+    # Angel One live price test
+    print("\n--- Live Price Test ---")
+    if fetcher.connect():
+        fetcher.get_live_price("NIFTY")
+        fetcher.get_live_price("BANKNIFTY")
