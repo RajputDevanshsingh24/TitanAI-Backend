@@ -162,7 +162,7 @@ def bot_trade():
             print("⚠️ Same signal — skip")
             return
 
-        if signal["confidence"] < 45:
+        if signal["confidence"] < 30:
             print(f"⚠️ Low confidence — skip")
             return
 
