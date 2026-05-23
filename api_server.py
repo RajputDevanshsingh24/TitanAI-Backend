@@ -166,9 +166,9 @@ def bot_trade():
             print(f"⚠️ Low confidence — skip")
             return
 
-        if signal["value"] == 0:
-            print("🟡 NO TRADE — waiting")
-            return
+       # if signal["value"] == 0:
+         #   print("🟡 NO TRADE — waiting")
+         #   return
 
         order_id = bot.order_mgr.execute_signal(
             signal, "NIFTY"

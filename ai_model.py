@@ -56,6 +56,8 @@ class AIModel:
         # 0.3% threshold
         df["Label"] = 0
         df.loc[df["Return"] > 0, "Label"] = 1  # UP
+        print(f"   UP signals:   {(y==1).sum()}")
+        print(f"   DOWN signals: {(y==0).sum()}")
 
         # Extra features add karo
         df["Price_Change"]  = df["Close"].pct_change()
@@ -172,8 +174,8 @@ class AIModel:
         print("\n⚡ XGBoost training...")
 
         # XGBoost labels: 0,1,2
-        y_train_xgb = y_train.map({-1: 0, 0: 1, 1: 2})
-        y_test_xgb  = y_test.map({-1: 0, 0: 1, 1: 2})
+        y_train_xgb = y_train  # Direct use karo
+        y_test_xgb  = y_test   # Direct use karo
 
         scale_pos = len(y_train[y_train==0]) / max(
             len(y_train[y_train==1]), 1
@@ -296,7 +298,7 @@ class AIModel:
 
             # XGB predict
             xgb_raw  = self.xgb_model.predict(X)[0]
-            xgb_pred = {0: -1, 1: 0, 2: 1}[xgb_raw]
+            xgb_pred = int(xgb_raw)  # 0 ya 1
             xgb_prob = self.xgb_model.predict_proba(X)[0]
             xgb_conf = max(xgb_prob) * 100
 
