@@ -55,8 +55,7 @@ class AIModel:
 
         # 0.3% threshold
         df["Label"] = 0
-        df.loc[df["Return"] >  0.3, "Label"] =  1  # BUY
-        df.loc[df["Return"] < -0.3, "Label"] = -1  # SELL
+        df.loc[df["Return"] > 0, "Label"] = 1  # UP
 
         # Extra features add karo
         df["Price_Change"]  = df["Close"].pct_change()
@@ -317,10 +316,9 @@ class AIModel:
             # Signal text
             if signal == 1:
                 signal_text = "🟢 BUY CALL"
-            elif signal == -1:
+            else :
                 signal_text = "🔴 BUY PUT"
-            else:
-                signal_text = "🟡 NO TRADE"
+            
 
             result = {
                 "signal"     : signal_text,
