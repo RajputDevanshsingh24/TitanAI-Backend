@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — AI Model UPGRADED v2.0
+# TITAN-AI TRADER — AI Model FINAL
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -8,15 +8,10 @@ import numpy as np
 import pickle
 import os
 from datetime import datetime
-from sklearn.ensemble import (
-    RandomForestClassifier,
-    GradientBoostingClassifier,
-    VotingClassifier
-)
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import accuracy_score
 import xgboost as xgb
 import warnings
 warnings.filterwarnings("ignore")
@@ -25,60 +20,44 @@ warnings.filterwarnings("ignore")
 class AIModel:
 
     def __init__(self):
-        self.rf_model    = None
-        self.xgb_model   = None
-        self.gb_model    = None
-        self.scaler      = StandardScaler()
-        self.is_trained  = False
-        self.accuracy    = 0
-        self.model_path  = "models/"
+        self.rf_model     = None
+        self.xgb_model    = None
+        self.scaler       = StandardScaler()
+        self.is_trained   = False
+        self.accuracy     = 0.0
+        self.model_path   = "models/"
         self.feature_cols = []
         os.makedirs(self.model_path, exist_ok=True)
 
     # ============================================
-    # FEATURES PREPARE KARO
+    # FEATURES
     # ============================================
-    def prepare_features(self, df):
+    def _get_features(self, df):
         from indicators import Indicators
 
-        print("⚙️ Features prepare ho rahe hain...")
+        data = df.copy()
+        ind  = Indicators(data)
+        data = ind.add_all()
 
-        ind = Indicators(df.copy())
-        df  = ind.add_all()
-
-        # Labels banana
-        df["Future_Close"] = df["Close"].shift(-1)
-        df["Return"]       = (
-            (df["Future_Close"] - df["Close"]) /
-            df["Close"] * 100
+        # Extra features
+        data["Price_Change"]  = data["Close"].pct_change()
+        data["HL_Ratio"]      = (
+            (data["High"] - data["Low"]) /
+            data["Close"].clip(lower=0.01)
         )
+        data["CO_Ratio"]      = (
+            (data["Close"] - data["Open"]) /
+            data["Open"].clip(lower=0.01)
+        )
+        data["Roll_Mean_5"]   = data["Close"].rolling(5).mean()
+        data["Roll_Std_5"]    = data["Close"].rolling(5).std()
+        data["Roll_Mean_10"]  = data["Close"].rolling(10).mean()
+        data["Roll_Std_10"]   = data["Close"].rolling(10).std()
+        data["Mom_5"]         = data["Close"] - data["Close"].shift(5)
+        data["Mom_10"]        = data["Close"] - data["Close"].shift(10)
+        data["Vol_Change"]    = data["Volume"].pct_change()
 
-        # 0.3% threshold
-        df["Label"] = 0
-        df.loc[df["Return"] > 0, "Label"] = 1  # UP
-        print(f"   UP signals:   {(y==1).sum()}")
-        print(f"   DOWN signals: {(y==0).sum()}")
-
-        # Extra features add karo
-        df["Price_Change"]  = df["Close"].pct_change()
-        df["High_Low_Ratio"] = (df["High"] - df["Low"]) / df["Close"]
-        df["Close_Open_Ratio"] = (df["Close"] - df["Open"]) / df["Open"]
-
-        # Rolling features
-        df["Rolling_Mean_5"]  = df["Close"].rolling(5).mean()
-        df["Rolling_Std_5"]   = df["Close"].rolling(5).std()
-        df["Rolling_Mean_10"] = df["Close"].rolling(10).mean()
-        df["Rolling_Std_10"]  = df["Close"].rolling(10).std()
-
-        # Momentum
-        df["Momentum_5"]  = df["Close"] - df["Close"].shift(5)
-        df["Momentum_10"] = df["Close"] - df["Close"].shift(10)
-
-        # Volume change
-        df["Volume_Change"] = df["Volume"].pct_change()
-
-        feature_cols = [
-            # Core indicators
+        cols = [
             "RSI", "MACD", "MACD_Sig", "MACD_Hist",
             "BB_Position", "BB_Width",
             "EMA_9", "EMA_20", "EMA_50",
@@ -86,434 +65,275 @@ class AIModel:
             "Change_1d", "Change_5d", "Change_20d",
             "Bullish", "Bearish", "Doji",
             "Hammer", "ShootingStar",
-            # Extra features
-            "Price_Change",
-            "High_Low_Ratio",
-            "Close_Open_Ratio",
-            "Rolling_Mean_5",
-            "Rolling_Std_5",
-            "Rolling_Mean_10",
-            "Rolling_Std_10",
-            "Momentum_5",
-            "Momentum_10",
-            "Volume_Change",
+            "Price_Change", "HL_Ratio", "CO_Ratio",
+            "Roll_Mean_5", "Roll_Std_5",
+            "Roll_Mean_10", "Roll_Std_10",
+            "Mom_5", "Mom_10", "Vol_Change",
         ]
 
-        available = [c for c in feature_cols
-                     if c in df.columns]
+        available = [c for c in cols if c in data.columns]
+        data      = data.dropna().iloc[:-1]
 
-        df = df.dropna()
-        df = df[:-1]  # Last row remove
+        X = data[available].copy()
+        X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        X = df[available]
-        y = df["Label"]
-
-        # Infinite values remove karo
-        X = X.replace([np.inf, -np.inf], np.nan)
-        X = X.fillna(0)
-
-        print(f"✅ Features ready: {len(available)} columns")
-        print(f"✅ Total samples: {len(X)}")
-        print(f"   BUY signals:    {(y==1).sum()}")
-        print(f"   SELL signals:   {(y==-1).sum()}")
-        print(f"   NO TRADE:       {(y==0).sum()}")
-
-        return X, y
+        return X, available
 
     # ============================================
-    # MODEL TRAIN KARO
+    # LABELS
+    # ============================================
+    def _get_labels(self, df):
+        data             = df.copy()
+        data["Next"]     = data["Close"].shift(-1)
+        data["Return"]   = (data["Next"] - data["Close"]) / data["Close"]
+        data             = data.dropna().iloc[:-1]
+        labels           = (data["Return"] > 0).astype(int)
+        return labels
+
+    # ============================================
+    # TRAIN
     # ============================================
     def train(self, df):
         print("\n" + "="*50)
         print("🤖 AI MODEL TRAINING SHURU!")
-        print(f"   Data rows: {len(df)}")
+        print(f"   Data: {len(df)} rows")
         print("="*50)
 
-        # Features
-        X, y = self.prepare_features(df)
+        try:
+            X, self.feature_cols = self._get_features(df)
+            y                    = self._get_labels(df)
 
-        # Train/Test split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size    = 0.2,
-            shuffle      = False
-        )
+            # Align lengths
+            min_len = min(len(X), len(y))
+            X       = X.iloc[:min_len]
+            y       = y.iloc[:min_len]
 
-        print(f"\n📊 Training samples: {len(X_train)}")
-        print(f"📊 Testing samples:  {len(X_test)}")
+            print(f"\n✅ Samples: {len(X)}")
+            print(f"   UP:   {y.sum()} ({y.mean()*100:.1f}%)")
+            print(f"   DOWN: {(y==0).sum()} ({(1-y.mean())*100:.1f}%)")
 
-        # Scale karo
-        X_train_sc = self.scaler.fit_transform(X_train)
-        X_test_sc  = self.scaler.transform(X_test)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, shuffle=False
+            )
 
-        # Class weights (balanced)
-        classes     = np.unique(y_train)
-        class_wts   = compute_class_weight(
-            'balanced', classes=classes, y=y_train
-        )
-        class_weight_dict = dict(zip(classes, class_wts))
+            X_tr = self.scaler.fit_transform(X_train)
+            X_te = self.scaler.transform(X_test)
 
-        # ---- MODEL 1: RANDOM FOREST ----
-        print("\n🌲 Random Forest training...")
-        self.rf_model = RandomForestClassifier(
-            n_estimators      = 500,
-            max_depth         = 15,
-            min_samples_split = 5,
-            min_samples_leaf  = 2,
-            max_features      = 'sqrt',
-            class_weight      = class_weight_dict,
-            random_state      = 42,
-            n_jobs            = -1
-        )
-        self.rf_model.fit(X_train_sc, y_train)
-        rf_pred = self.rf_model.predict(X_test_sc)
-        rf_acc  = accuracy_score(y_test, rf_pred) * 100
-        print(f"✅ Random Forest: {rf_acc:.2f}%")
+            # ---- RANDOM FOREST ----
+            print("\n🌲 Random Forest...")
+            self.rf_model = RandomForestClassifier(
+                n_estimators      = 300,
+                max_depth         = 10,
+                min_samples_split = 10,
+                min_samples_leaf  = 5,
+                max_features      = 'sqrt',
+                class_weight      = 'balanced',
+                random_state      = 42,
+                n_jobs            = -1
+            )
+            self.rf_model.fit(X_tr, y_train)
+            rf_pred = self.rf_model.predict(X_te)
+            rf_acc  = accuracy_score(y_test, rf_pred) * 100
+            print(f"✅ RF: {rf_acc:.2f}%")
 
-        # ---- MODEL 2: XGBOOST ----
-        print("\n⚡ XGBoost training...")
+            # ---- XGBOOST ----
+            print("\n⚡ XGBoost...")
+            self.xgb_model = xgb.XGBClassifier(
+                n_estimators     = 300,
+                max_depth        = 6,
+                learning_rate    = 0.05,
+                subsample        = 0.8,
+                colsample_bytree = 0.8,
+                min_child_weight = 5,
+                random_state     = 42,
+                eval_metric      = "logloss",
+                verbosity        = 0
+            )
+            self.xgb_model.fit(
+                X_tr, y_train,
+                eval_set        = [(X_te, y_test)],
+                verbose         = False
+            )
+            xgb_pred = self.xgb_model.predict(X_te)
+            xgb_acc  = accuracy_score(y_test, xgb_pred) * 100
+            print(f"✅ XGB: {xgb_acc:.2f}%")
 
-        # XGBoost labels: 0,1,2
-        y_train_xgb = y_train  # Direct use karo
-        y_test_xgb  = y_test   # Direct use karo
+            # ---- ENSEMBLE ----
+            ens_pred = []
+            for i in range(len(rf_pred)):
+                votes = [int(rf_pred[i]), int(xgb_pred[i])]
+                ens_pred.append(
+                    1 if votes.count(1) > votes.count(0) else 0
+                )
 
-        scale_pos = len(y_train[y_train==0]) / max(
-            len(y_train[y_train==1]), 1
-        )
+            ens_acc = accuracy_score(y_test, ens_pred) * 100
 
-        self.xgb_model = xgb.XGBClassifier(
-            n_estimators     = 500,
-            max_depth        = 8,
-            learning_rate    = 0.05,
-            subsample        = 0.8,
-            colsample_bytree = 0.8,
-            min_child_weight = 3,
-            gamma            = 0.1,
-            reg_alpha        = 0.1,
-            reg_lambda       = 1.0,
-            random_state     = 42,
-            eval_metric      = "mlogloss",
-            verbosity        = 0
-        )
-        self.xgb_model.fit(
-            X_train_sc, y_train_xgb,
-            eval_set  = [(X_test_sc, y_test_xgb)],
-            verbose   = False
-        )
-        xgb_raw      = self.xgb_model.predict(X_test_sc)
-        xgb_pred_map = pd.Series(xgb_raw).map(
-            {0: -1, 1: 0, 2: 1}
-        )
-        xgb_acc = accuracy_score(
-            y_test, xgb_pred_map
-        ) * 100
-        print(f"✅ XGBoost: {xgb_acc:.2f}%")
+            print(f"\n{'='*50}")
+            print(f"📊 RESULTS:")
+            print(f"   RF:       {rf_acc:.2f}%")
+            print(f"   XGBoost:  {xgb_acc:.2f}%")
+            print(f"   Ensemble: {ens_acc:.2f}%")
+            print(f"{'='*50}")
 
-        # ---- MODEL 3: GRADIENT BOOSTING ----
-        print("\n🚀 Gradient Boosting training...")
-        self.gb_model = GradientBoostingClassifier(
-            n_estimators  = 300,
-            max_depth     = 6,
-            learning_rate = 0.05,
-            subsample     = 0.8,
-            random_state  = 42
-        )
-        self.gb_model.fit(X_train_sc, y_train)
-        gb_pred = self.gb_model.predict(X_test_sc)
-        gb_acc  = accuracy_score(y_test, gb_pred) * 100
-        print(f"✅ Gradient Boosting: {gb_acc:.2f}%")
+            self.accuracy   = ens_acc
+            self.is_trained = True
+            self._save()
+            return ens_acc
 
-        # ---- ENSEMBLE VOTING ----
-        from collections import Counter
-        ensemble_pred = []
-        xgb_list = list(xgb_pred_map)
-
-        for i in range(len(rf_pred)):
-            votes = [
-                rf_pred[i],
-                xgb_list[i],
-                gb_pred[i]
-            ]
-            vote = Counter(votes).most_common(1)[0][0]
-            ensemble_pred.append(vote)
-
-        ens_acc = accuracy_score(
-            y_test, ensemble_pred
-        ) * 100
-
-        print(f"\n{'='*50}")
-        print(f"📊 FINAL RESULTS:")
-        print(f"   Random Forest:     {rf_acc:.2f}%")
-        print(f"   XGBoost:           {xgb_acc:.2f}%")
-        print(f"   Gradient Boosting: {gb_acc:.2f}%")
-        print(f"   Ensemble:          {ens_acc:.2f}%")
-        print(f"{'='*50}")
-
-        self.accuracy     = ens_acc
-        self.is_trained   = True
-        self.feature_cols = list(X.columns)
-
-        # Save karo
-        self.save_model()
-        return ens_acc
+        except Exception as e:
+            print(f"❌ Training Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0.0
 
     # ============================================
-    # PREDICT KARO
+    # PREDICT
     # ============================================
     def predict(self, df):
         try:
             if not self.is_trained:
-                self.load_model()
+                if not self._load():
+                    return None
 
-            from indicators import Indicators
-            ind = Indicators(df.copy())
-            df  = ind.add_all()
+            X, _ = self._get_features(df)
 
-            # Extra features
-            df["Price_Change"]     = df["Close"].pct_change()
-            df["High_Low_Ratio"]   = (
-                (df["High"] - df["Low"]) / df["Close"]
+            # Available features only
+            available = [c for c in self.feature_cols
+                        if c in X.columns]
+            if not available:
+                print("❌ Features mismatch!")
+                return None
+
+            row = X[available].iloc[-1].copy()
+            row = row.fillna(0).replace(
+                [np.inf, -np.inf], 0
             )
-            df["Close_Open_Ratio"] = (
-                (df["Close"] - df["Open"]) / df["Open"]
+
+            X_pred = self.scaler.transform(
+                row.values.reshape(1, -1)
             )
-            df["Rolling_Mean_5"]   = df["Close"].rolling(5).mean()
-            df["Rolling_Std_5"]    = df["Close"].rolling(5).std()
-            df["Rolling_Mean_10"]  = df["Close"].rolling(10).mean()
-            df["Rolling_Std_10"]   = df["Close"].rolling(10).std()
-            df["Momentum_5"]       = df["Close"] - df["Close"].shift(5)
-            df["Momentum_10"]      = df["Close"] - df["Close"].shift(10)
-            df["Volume_Change"]    = df["Volume"].pct_change()
 
-            latest = df.iloc[-1][self.feature_cols]
-            latest = latest.fillna(0)
-            latest = latest.replace([np.inf, -np.inf], 0)
+            rf_pred  = int(self.rf_model.predict(X_pred)[0])
+            rf_prob  = self.rf_model.predict_proba(X_pred)[0]
+            rf_conf  = float(max(rf_prob) * 100)
 
-            X = self.scaler.transform([latest])
+            xgb_pred = int(self.xgb_model.predict(X_pred)[0])
+            xgb_prob = self.xgb_model.predict_proba(X_pred)[0]
+            xgb_conf = float(max(xgb_prob) * 100)
 
-            # RF predict
-            rf_pred  = self.rf_model.predict(X)[0]
-            rf_prob  = self.rf_model.predict_proba(X)[0]
-            rf_conf  = max(rf_prob) * 100
+            # Ensemble
+            signal   = 1 if (rf_pred + xgb_pred) >= 1 else 0
+            avg_conf = (rf_conf + xgb_conf) / 2
 
-            # XGB predict
-            xgb_raw  = self.xgb_model.predict(X)[0]
-            xgb_pred = int(xgb_raw)  # 0 ya 1
-            xgb_prob = self.xgb_model.predict_proba(X)[0]
-            xgb_conf = max(xgb_prob) * 100
+            signal_text = (
+                "🟢 BUY CALL" if signal == 1
+                else "🔴 BUY PUT"
+            )
 
-            # GB predict
-            gb_pred  = self.gb_model.predict(X)[0]
-            gb_prob  = self.gb_model.predict_proba(X)[0]
-            gb_conf  = max(gb_prob) * 100
+            print(f"🎯 {signal_text} | "
+                  f"Conf: {avg_conf:.1f}% | "
+                  f"RF:{rf_pred} XGB:{xgb_pred}")
 
-            # Ensemble vote
-            from collections import Counter
-            votes    = [rf_pred, xgb_pred, gb_pred]
-            signal   = Counter(votes).most_common(1)[0][0]
-
-            # Average confidence
-            avg_conf = (rf_conf + xgb_conf + gb_conf) / 3
-
-            # Signal text
-            if signal == 1:
-                signal_text = "🟢 BUY CALL"
-            else :
-                signal_text = "🔴 BUY PUT"
-            
-
-            result = {
+            return {
                 "signal"     : signal_text,
                 "value"      : signal,
                 "confidence" : avg_conf,
                 "rf_signal"  : rf_pred,
                 "xgb_signal" : xgb_pred,
-                "gb_signal"  : gb_pred,
                 "rf_conf"    : rf_conf,
                 "xgb_conf"   : xgb_conf,
-                "gb_conf"    : gb_conf,
                 "timestamp"  : datetime.now().strftime(
                                "%Y-%m-%d %H:%M:%S")
             }
 
-            print(f"🎯 Prediction:")
-            print(f"   Signal:     {signal_text}")
-            print(f"   Confidence: {avg_conf:.1f}%")
-            print(f"   RF:  {rf_pred} ({rf_conf:.1f}%)")
-            print(f"   XGB: {xgb_pred} ({xgb_conf:.1f}%)")
-            print(f"   GB:  {gb_pred} ({gb_conf:.1f}%)")
-
-            return result
-
         except Exception as e:
-            print(f"❌ Prediction Error: {e}")
+            print(f"❌ Predict Error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     # ============================================
-    # MODEL SAVE
+    # SAVE / LOAD
     # ============================================
-    def save_model(self):
+    def _save(self):
         try:
-            pickle.dump(
-                self.rf_model,
-                open(f"{self.model_path}rf_model.pkl", "wb")
-            )
-            pickle.dump(
-                self.xgb_model,
-                open(f"{self.model_path}xgb_model.pkl", "wb")
-            )
-            pickle.dump(
-                self.gb_model,
-                open(f"{self.model_path}gb_model.pkl", "wb")
-            )
-            pickle.dump(
-                self.scaler,
-                open(f"{self.model_path}scaler.pkl", "wb")
-            )
-            pickle.dump(
-                self.feature_cols,
-                open(f"{self.model_path}features.pkl", "wb")
-            )
-            with open(f"{self.model_path}accuracy.txt", "w") as f:
+            p = self.model_path
+            pickle.dump(self.rf_model,
+                open(f"{p}rf_model.pkl",   "wb"))
+            pickle.dump(self.xgb_model,
+                open(f"{p}xgb_model.pkl",  "wb"))
+            pickle.dump(self.scaler,
+                open(f"{p}scaler.pkl",     "wb"))
+            pickle.dump(self.feature_cols,
+                open(f"{p}features.pkl",   "wb"))
+            with open(f"{p}accuracy.txt", "w") as f:
                 f.write(str(self.accuracy))
-
-            print(f"\n💾 Model saved!")
-            print(f"   Accuracy: {self.accuracy:.2f}%")
-
+            print(f"💾 Model saved! ({self.accuracy:.2f}%)")
         except Exception as e:
             print(f"❌ Save Error: {e}")
 
-    # ============================================
-    # MODEL LOAD
-    # ============================================
-    def load_model(self):
+    def _load(self):
         try:
+            p = self.model_path
             self.rf_model = pickle.load(
-                open(f"{self.model_path}rf_model.pkl", "rb")
-            )
+                open(f"{p}rf_model.pkl",  "rb"))
             self.xgb_model = pickle.load(
-                open(f"{self.model_path}xgb_model.pkl", "rb")
-            )
+                open(f"{p}xgb_model.pkl", "rb"))
             self.scaler = pickle.load(
-                open(f"{self.model_path}scaler.pkl", "rb")
-            )
+                open(f"{p}scaler.pkl",    "rb"))
             self.feature_cols = pickle.load(
-                open(f"{self.model_path}features.pkl", "rb")
-            )
-
-            # GB model (optional — purane model mein nahi hoga)
-            try:
-                self.gb_model = pickle.load(
-                    open(f"{self.model_path}gb_model.pkl", "rb")
-                )
-            except:
-                self.gb_model = None
-                print("⚠️ GB model nahi mila — 2 model use honge")
-
-            with open(f"{self.model_path}accuracy.txt", "r") as f:
+                open(f"{p}features.pkl",  "rb"))
+            with open(f"{p}accuracy.txt", "r") as f:
                 self.accuracy = float(f.read())
-
             self.is_trained = True
-            print(f"✅ Model loaded! Accuracy: {self.accuracy:.2f}%")
+            print(f"✅ Model loaded! ({self.accuracy:.2f}%)")
             return True
-
         except Exception as e:
-            print(f"⚠️ Model load failed: {e}")
+            print(f"⚠️ Load failed: {e}")
             return False
 
+    # Backward compatibility
+    def save_model(self): self._save()
+    def load_model(self): return self._load()
+
     # ============================================
-    # BACKTESTING
+    # BACKTEST
     # ============================================
     def backtest(self, df):
-        print("\n" + "="*50)
-        print("📊 BACKTESTING SHURU...")
-        print("="*50)
+        try:
+            print("\n📊 BACKTESTING...")
+            X, _  = self._get_features(df)
+            y     = self._get_labels(df)
+            min_l = min(len(X), len(y))
+            X, y  = X.iloc[:min_l], y.iloc[:min_l]
 
-        X, y = self.prepare_features(df)
-        capital   = 50000
-        start_cap = capital
-        trades    = []
-        wins      = 0
-        losses    = 0
+            X_sc  = self.scaler.transform(X)
+            preds = self.rf_model.predict(X_sc)
 
-        X_sc  = self.scaler.transform(X)
-        preds = self.rf_model.predict(X_sc)
+            capital = 50000
+            start   = capital
+            wins    = 0
+            losses  = 0
+            closes  = df["Close"].values
 
-        for i in range(len(preds)-1):
-            signal      = preds[i]
-            price_today = df["Close"].iloc[i]
-            price_next  = df["Close"].iloc[i+1]
+            for i in range(min(len(preds)-1, len(closes)-2)):
+                sig    = int(preds[i])
+                change = (closes[i+1] - closes[i]) / closes[i]
+                profit = capital * 0.02 * (
+                    change if sig == 1 else -change
+                ) * 10
+                capital += profit
+                if profit > 0: wins += 1
+                else: losses += 1
 
-            if signal == 0:
-                continue
+            total    = wins + losses
+            win_rate = wins/total*100 if total > 0 else 0
 
-            change = (price_next - price_today) / price_today
+            print(f"   Capital: ₹{start:,.0f} → ₹{capital:,.0f}")
+            print(f"   Profit:  ₹{capital-start:,.0f}")
+            print(f"   Win Rate: {win_rate:.1f}%")
+            return {"capital": capital, "win_rate": win_rate}
 
-            if signal == 1:
-                profit = capital * 0.02 * change * 10
-            elif signal == -1:
-                profit = capital * 0.02 * (-change) * 10
-
-            capital += profit
-            trades.append(profit)
-
-            if profit > 0:
-                wins += 1
-            else:
-                losses += 1
-
-        total_trades = wins + losses
-        win_rate     = (wins/total_trades*100) if total_trades > 0 else 0
-        total_profit = capital - start_cap
-        returns      = (total_profit/start_cap*100)
-
-        print(f"\n💰 BACKTEST RESULTS:")
-        print(f"   Starting Capital: ₹{start_cap:,.0f}")
-        print(f"   Final Capital:    ₹{capital:,.0f}")
-        print(f"   Total Profit:     ₹{total_profit:,.0f}")
-        print(f"   Returns:          {returns:.2f}%")
-        print(f"   Total Trades:     {total_trades}")
-        print(f"   Wins:             {wins}")
-        print(f"   Losses:           {losses}")
-        print(f"   Win Rate:         {win_rate:.2f}%")
-        print(f"   Model Accuracy:   {self.accuracy:.2f}%")
-
-        return {
-            "final_capital": capital,
-            "profit"       : total_profit,
-            "returns"      : returns,
-            "win_rate"     : win_rate,
-            "total_trades" : total_trades
-        }
-
-
-# ============================================
-# TEST
-# ============================================
-if __name__ == "__main__":
-    from data_fetcher import DataFetcher
-    import os
-
-    os.environ["ANGEL_API_KEY"]    = "mB3Hghfu"
-    os.environ["ANGEL_CLIENT_ID"]  = "AACG329697"
-    os.environ["ANGEL_PASSWORD"]   = "4160"
-    os.environ["ANGEL_TOTP_KEY"]   = "TOTP_KEY_YAHAN"
-
-    print("📊 Data fetch ho raha hai...")
-    fetcher = DataFetcher()
-    df = fetcher.get_best_data("NIFTY")
-
-    if df is not None:
-        print(f"✅ Data: {len(df)} rows")
-
-        model    = AIModel()
-        accuracy = model.train(df)
-        model.backtest(df)
-
-        print("\n🎯 LIVE PREDICTION:")
-        result = model.predict(df)
-        if result:
-            print(f"Signal:     {result['signal']}")
-            print(f"Confidence: {result['confidence']:.1f}%")
-    else:
-        print("❌ Data fetch failed!")
+        except Exception as e:
+            print(f"❌ Backtest Error: {e}")
+            return None
