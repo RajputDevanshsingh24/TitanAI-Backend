@@ -105,6 +105,8 @@ class BotState:
 # ============================================
 # AUTO TRADING
 # ============================================
+
+"""
 def bot_trade():
     try:
         if bot is None or not bot.running:
@@ -140,14 +142,76 @@ def bot_trade():
         print(f"🎯 Signal: {signal['signal']} "
               f"| Conf: {signal['confidence']:.1f}%")
 
+
+              """
+def bot_trade():
+    try:
+        if bot is None or not bot.running:
+            return
+        ist_time = get_ist_time()
+        market   = is_market_open()
+        print(f"⏰ IST: {ist_time} | "
+              f"Market: {'OPEN 🟢' if market else 'CLOSED 🔴'}")
+        if not market:
+            return
+        if bot.df is None:
+            print("⚠️ Data nahi — skip")
+            return
+        if not bot.model.is_trained:
+            print("⚠️ Model ready nahi — skip")
+            return
+
+        can, reasons = bot.order_mgr.risk.can_trade()
+        if not can:
+            for r in reasons:
+                print(r)
+            return
+
+        signal = bot.model.predict(bot.df)
+        if not signal:
+            print("❌ Signal nahi mila")
+            return
+
+        print(f"🎯 Signal: {signal['signal']} "
+              f"| Conf: {signal['confidence']:.1f}%")
+
+        # Min confidence 30%
+        if signal["confidence"] < 30:
+            print(f"⚠️ Low confidence — skip")
+            return
+
+        # ⭐ FIX: Same signal sirf tab skip karo
+        # jab trade already hua ho (trade_count > 0)
+        if (signal["value"] == bot.last_signal and
+                bot.trade_count > 0):
+            print("⚠️ Same signal — skip")
+            return
+
+        # Execute
+        order_id = bot.order_mgr.execute_signal(
+            signal, "NIFTY"
+        )
+
+        if order_id:
+            # ⭐ Sirf successful trade pe last_signal update
+            bot.last_signal  = signal["value"]
+            bot.trade_count += 1
+            print(f"✅ Trade executed: {order_id}")
+        else:
+            print("⚠️ Trade execute nahi hua")
+
+    except Exception as e:
+        print(f"❌ Trade Error: {e}")
+        import traceback
+        traceback.print_exc()
         
         # Same signal skip
         
         # YAHA MAINE SAME SIGNAL CHECK HATA DIYA HAI KYUNKI KAI BAAR MODEL SAME SIGNAL DE SAKTA HAI JAB TAK DATA UPDATE NA HO. ISSE BOT ZYADA ACTIVE RAHEGA. LEKIN AAP CHAHE TO IS CHECK KO WAPAS DAAL SAKTE HAIN.
 
-       # if signal["value"] == bot.last_signal:
-       #     print("⚠️ Same signal — skip")
-       #     return
+        if signal["value"] == bot.last_signal:
+            print("⚠️ Same signal — skip")
+            return
 
 
 
