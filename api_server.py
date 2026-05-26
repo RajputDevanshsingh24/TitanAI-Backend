@@ -105,8 +105,6 @@ class BotState:
 # ============================================
 # AUTO TRADING
 # ============================================
-
-
 def bot_trade():
     try:
         if bot is None or not bot.running:
@@ -142,19 +140,10 @@ def bot_trade():
         print(f"🎯 Signal: {signal['signal']} "
               f"| Conf: {signal['confidence']:.1f}%")
 
-
-              
-
-        
         # Same signal skip
-        
-        # YAHA MAINE SAME SIGNAL CHECK HATA DIYA HAI KYUNKI KAI BAAR MODEL SAME SIGNAL DE SAKTA HAI JAB TAK DATA UPDATE NA HO. ISSE BOT ZYADA ACTIVE RAHEGA. LEKIN AAP CHAHE TO IS CHECK KO WAPAS DAAL SAKTE HAIN.
-
         if signal["value"] == bot.last_signal:
             print("⚠️ Same signal — skip")
             return
-
-
 
         # Min confidence 30%
         if signal["confidence"] < 30:
