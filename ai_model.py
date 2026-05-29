@@ -1,6 +1,9 @@
 # ============================================
-# TITAN-AI TRADER — AI Model FINAL
+# TITAN-AI TRADER — AI Model FIXED v2.0
 # TITAN-SURYA TECHNOLOGIES
+#
+# BUG FIX: Ensemble logic — pehle ek bhi model BUY bolta toh
+# trade execute hota tha. Ab DONO models agree karen tabhi signal.
 # ============================================
 
 import pandas as pd
@@ -29,9 +32,6 @@ class AIModel:
         self.feature_cols = []
         os.makedirs(self.model_path, exist_ok=True)
 
-    # ============================================
-    # FEATURES
-    # ============================================
     def _get_features(self, df):
         from indicators import Indicators
 
@@ -39,23 +39,16 @@ class AIModel:
         ind  = Indicators(data)
         data = ind.add_all()
 
-        # Extra features
-        data["Price_Change"]  = data["Close"].pct_change()
-        data["HL_Ratio"]      = (
-            (data["High"] - data["Low"]) /
-            data["Close"].clip(lower=0.01)
-        )
-        data["CO_Ratio"]      = (
-            (data["Close"] - data["Open"]) /
-            data["Open"].clip(lower=0.01)
-        )
-        data["Roll_Mean_5"]   = data["Close"].rolling(5).mean()
-        data["Roll_Std_5"]    = data["Close"].rolling(5).std()
-        data["Roll_Mean_10"]  = data["Close"].rolling(10).mean()
-        data["Roll_Std_10"]   = data["Close"].rolling(10).std()
-        data["Mom_5"]         = data["Close"] - data["Close"].shift(5)
-        data["Mom_10"]        = data["Close"] - data["Close"].shift(10)
-        data["Vol_Change"]    = data["Volume"].pct_change()
+        data["Price_Change"] = data["Close"].pct_change()
+        data["HL_Ratio"]     = (data["High"] - data["Low"]) / data["Close"].clip(lower=0.01)
+        data["CO_Ratio"]     = (data["Close"] - data["Open"]) / data["Open"].clip(lower=0.01)
+        data["Roll_Mean_5"]  = data["Close"].rolling(5).mean()
+        data["Roll_Std_5"]   = data["Close"].rolling(5).std()
+        data["Roll_Mean_10"] = data["Close"].rolling(10).mean()
+        data["Roll_Std_10"]  = data["Close"].rolling(10).std()
+        data["Mom_5"]        = data["Close"] - data["Close"].shift(5)
+        data["Mom_10"]       = data["Close"] - data["Close"].shift(10)
+        data["Vol_Change"]   = data["Volume"].pct_change()
 
         cols = [
             "RSI", "MACD", "MACD_Sig", "MACD_Hist",
@@ -73,26 +66,17 @@ class AIModel:
 
         available = [c for c in cols if c in data.columns]
         data      = data.dropna().iloc[:-1]
-
-        X = data[available].copy()
-        X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
-
+        X         = data[available].copy()
+        X         = X.replace([np.inf, -np.inf], np.nan).fillna(0)
         return X, available
 
-    # ============================================
-    # LABELS
-    # ============================================
     def _get_labels(self, df):
-        data             = df.copy()
-        data["Next"]     = data["Close"].shift(-1)
-        data["Return"]   = (data["Next"] - data["Close"]) / data["Close"]
-        data             = data.dropna().iloc[:-1]
-        labels           = (data["Return"] > 0).astype(int)
-        return labels
+        data           = df.copy()
+        data["Next"]   = data["Close"].shift(-1)
+        data["Return"] = (data["Next"] - data["Close"]) / data["Close"]
+        data           = data.dropna().iloc[:-1]
+        return (data["Return"] > 0).astype(int)
 
-    # ============================================
-    # TRAIN
-    # ============================================
     def train(self, df):
         print("\n" + "="*50)
         print("🤖 AI MODEL TRAINING SHURU!")
@@ -103,10 +87,8 @@ class AIModel:
             X, self.feature_cols = self._get_features(df)
             y                    = self._get_labels(df)
 
-            # Align lengths
             min_len = min(len(X), len(y))
-            X       = X.iloc[:min_len]
-            y       = y.iloc[:min_len]
+            X, y    = X.iloc[:min_len], y.iloc[:min_len]
 
             print(f"\n✅ Samples: {len(X)}")
             print(f"   UP:   {y.sum()} ({y.mean()*100:.1f}%)")
@@ -115,12 +97,10 @@ class AIModel:
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=0.2, shuffle=False
             )
-
             X_tr = self.scaler.fit_transform(X_train)
             X_te = self.scaler.transform(X_test)
 
-            # ---- RANDOM FOREST ----
-            print("\n🌲 Random Forest...")
+            print("\n🌲 Random Forest training...")
             self.rf_model = RandomForestClassifier(
                 n_estimators      = 300,
                 max_depth         = 10,
@@ -136,8 +116,7 @@ class AIModel:
             rf_acc  = accuracy_score(y_test, rf_pred) * 100
             print(f"✅ RF: {rf_acc:.2f}%")
 
-            # ---- XGBOOST ----
-            print("\n⚡ XGBoost...")
+            print("\n⚡ XGBoost training...")
             self.xgb_model = xgb.XGBClassifier(
                 n_estimators     = 300,
                 max_depth        = 6,
@@ -149,30 +128,38 @@ class AIModel:
                 eval_metric      = "logloss",
                 verbosity        = 0
             )
-            self.xgb_model.fit(
-                X_tr, y_train,
-                eval_set        = [(X_te, y_test)],
-                verbose         = False
-            )
+            self.xgb_model.fit(X_tr, y_train, eval_set=[(X_te, y_test)], verbose=False)
             xgb_pred = self.xgb_model.predict(X_te)
             xgb_acc  = accuracy_score(y_test, xgb_pred) * 100
             print(f"✅ XGB: {xgb_acc:.2f}%")
 
-            # ---- ENSEMBLE ----
+            # ---- FIXED ENSEMBLE ----
+            # Pehla bug: signal = 1 if (rf+xgb) >= 1 else 0
+            # Matlab ek model bhi 1 bolta toh BUY — bahut aggressive
+            # FIX: Dono 1 => BUY CALL | Dono 0 => BUY PUT | Alag => NO TRADE
             ens_pred = []
             for i in range(len(rf_pred)):
-                votes = [int(rf_pred[i]), int(xgb_pred[i])]
-                ens_pred.append(
-                    1 if votes.count(1) > votes.count(0) else 0
-                )
+                if rf_pred[i] == 1 and xgb_pred[i] == 1:
+                    ens_pred.append(1)
+                elif rf_pred[i] == 0 and xgb_pred[i] == 0:
+                    ens_pred.append(0)
+                else:
+                    ens_pred.append(-1)  # NO TRADE
 
-            ens_acc = accuracy_score(y_test, ens_pred) * 100
+            valid_idx  = [i for i, p in enumerate(ens_pred) if p != -1]
+            if valid_idx:
+                v_preds  = [ens_pred[i] for i in valid_idx]
+                v_actual = [int(y_test.iloc[i]) for i in valid_idx]
+                ens_acc  = accuracy_score(v_actual, v_preds) * 100
+            else:
+                ens_acc = 50.0
 
             print(f"\n{'='*50}")
             print(f"📊 RESULTS:")
-            print(f"   RF:       {rf_acc:.2f}%")
-            print(f"   XGBoost:  {xgb_acc:.2f}%")
-            print(f"   Ensemble: {ens_acc:.2f}%")
+            print(f"   RF:            {rf_acc:.2f}%")
+            print(f"   XGBoost:       {xgb_acc:.2f}%")
+            print(f"   Ensemble:      {ens_acc:.2f}%")
+            print(f"   Valid signals: {len(valid_idx)}/{len(ens_pred)}")
             print(f"{'='*50}")
 
             self.accuracy   = ens_acc
@@ -182,13 +169,9 @@ class AIModel:
 
         except Exception as e:
             print(f"❌ Training Error: {e}")
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
             return 0.0
 
-    # ============================================
-    # PREDICT
-    # ============================================
     def predict(self, df):
         try:
             if not self.is_trained:
@@ -197,21 +180,13 @@ class AIModel:
 
             X, _ = self._get_features(df)
 
-            # Available features only
-            available = [c for c in self.feature_cols
-                        if c in X.columns]
+            available = [c for c in self.feature_cols if c in X.columns]
             if not available:
-                print("❌ Features mismatch!")
+                print("❌ Features mismatch! Model retrain karo.")
                 return None
 
-            row = X[available].iloc[-1].copy()
-            row = row.fillna(0).replace(
-                [np.inf, -np.inf], 0
-            )
-
-            X_pred = self.scaler.transform(
-                row.values.reshape(1, -1)
-            )
+            row    = X[available].iloc[-1].copy().fillna(0).replace([np.inf, -np.inf], 0)
+            X_pred = self.scaler.transform(row.values.reshape(1, -1))
 
             rf_pred  = int(self.rf_model.predict(X_pred)[0])
             rf_prob  = self.rf_model.predict_proba(X_pred)[0]
@@ -221,51 +196,44 @@ class AIModel:
             xgb_prob = self.xgb_model.predict_proba(X_pred)[0]
             xgb_conf = float(max(xgb_prob) * 100)
 
-            # Ensemble
-            signal   = 1 if (rf_pred + xgb_pred) >= 1 else 0
             avg_conf = (rf_conf + xgb_conf) / 2
 
-            signal_text = (
-                "🟢 BUY CALL" if signal == 1
-                else "🔴 BUY PUT"
-            )
+            # FIXED: Strict ensemble
+            if rf_pred == 1 and xgb_pred == 1:
+                signal      = 1
+                signal_text = "🟢 BUY CALL"
+            elif rf_pred == 0 and xgb_pred == 0:
+                signal      = -1
+                signal_text = "🔴 BUY PUT"
+            else:
+                signal      = 0
+                signal_text = "🟡 NO TRADE (models disagree)"
 
-            print(f"🎯 {signal_text} | "
-                  f"Conf: {avg_conf:.1f}% | "
-                  f"RF:{rf_pred} XGB:{xgb_pred}")
+            print(f"🎯 {signal_text} | Conf: {avg_conf:.1f}% | RF:{rf_pred} XGB:{xgb_pred}")
 
             return {
                 "signal"     : signal_text,
-                "value"      : signal,
+                "value"      : signal,   # 1=CALL, -1=PUT, 0=NO TRADE
                 "confidence" : avg_conf,
                 "rf_signal"  : rf_pred,
                 "xgb_signal" : xgb_pred,
                 "rf_conf"    : rf_conf,
                 "xgb_conf"   : xgb_conf,
-                "timestamp"  : datetime.now().strftime(
-                               "%Y-%m-%d %H:%M:%S")
+                "timestamp"  : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
         except Exception as e:
             print(f"❌ Predict Error: {e}")
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
             return None
 
-    # ============================================
-    # SAVE / LOAD
-    # ============================================
     def _save(self):
         try:
             p = self.model_path
-            pickle.dump(self.rf_model,
-                open(f"{p}rf_model.pkl",   "wb"))
-            pickle.dump(self.xgb_model,
-                open(f"{p}xgb_model.pkl",  "wb"))
-            pickle.dump(self.scaler,
-                open(f"{p}scaler.pkl",     "wb"))
-            pickle.dump(self.feature_cols,
-                open(f"{p}features.pkl",   "wb"))
+            pickle.dump(self.rf_model,     open(f"{p}rf_model.pkl",  "wb"))
+            pickle.dump(self.xgb_model,    open(f"{p}xgb_model.pkl", "wb"))
+            pickle.dump(self.scaler,       open(f"{p}scaler.pkl",    "wb"))
+            pickle.dump(self.feature_cols, open(f"{p}features.pkl",  "wb"))
             with open(f"{p}accuracy.txt", "w") as f:
                 f.write(str(self.accuracy))
             print(f"💾 Model saved! ({self.accuracy:.2f}%)")
@@ -275,30 +243,22 @@ class AIModel:
     def _load(self):
         try:
             p = self.model_path
-            self.rf_model = pickle.load(
-                open(f"{p}rf_model.pkl",  "rb"))
-            self.xgb_model = pickle.load(
-                open(f"{p}xgb_model.pkl", "rb"))
-            self.scaler = pickle.load(
-                open(f"{p}scaler.pkl",    "rb"))
-            self.feature_cols = pickle.load(
-                open(f"{p}features.pkl",  "rb"))
+            self.rf_model     = pickle.load(open(f"{p}rf_model.pkl",  "rb"))
+            self.xgb_model    = pickle.load(open(f"{p}xgb_model.pkl", "rb"))
+            self.scaler       = pickle.load(open(f"{p}scaler.pkl",    "rb"))
+            self.feature_cols = pickle.load(open(f"{p}features.pkl",  "rb"))
             with open(f"{p}accuracy.txt", "r") as f:
                 self.accuracy = float(f.read())
             self.is_trained = True
             print(f"✅ Model loaded! ({self.accuracy:.2f}%)")
             return True
         except Exception as e:
-            print(f"⚠️ Load failed: {e}")
+            print(f"⚠️ Model load failed: {e}")
             return False
 
-    # Backward compatibility
     def save_model(self): self._save()
     def load_model(self): return self._load()
 
-    # ============================================
-    # BACKTEST
-    # ============================================
     def backtest(self, df):
         try:
             print("\n📊 BACKTESTING...")
@@ -307,31 +267,36 @@ class AIModel:
             min_l = min(len(X), len(y))
             X, y  = X.iloc[:min_l], y.iloc[:min_l]
 
-            X_sc  = self.scaler.transform(X)
-            preds = self.rf_model.predict(X_sc)
+            X_sc      = self.scaler.transform(X)
+            rf_preds  = self.rf_model.predict(X_sc)
+            xgb_preds = self.xgb_model.predict(X_sc)
 
             capital = 50000
             start   = capital
-            wins    = 0
-            losses  = 0
-            closes  = df["Close"].values
+            wins = losses = skipped = 0
+            closes = df["Close"].values
 
-            for i in range(min(len(preds)-1, len(closes)-2)):
-                sig    = int(preds[i])
+            for i in range(min(len(rf_preds)-1, len(closes)-2)):
+                if rf_preds[i] == 1 and xgb_preds[i] == 1:
+                    sig = 1
+                elif rf_preds[i] == 0 and xgb_preds[i] == 0:
+                    sig = -1
+                else:
+                    skipped += 1
+                    continue
+
                 change = (closes[i+1] - closes[i]) / closes[i]
-                profit = capital * 0.02 * (
-                    change if sig == 1 else -change
-                ) * 10
+                profit = capital * 0.02 * (change if sig == 1 else -change) * 10
                 capital += profit
                 if profit > 0: wins += 1
-                else: losses += 1
+                else:          losses += 1
 
             total    = wins + losses
             win_rate = wins/total*100 if total > 0 else 0
-
-            print(f"   Capital: ₹{start:,.0f} → ₹{capital:,.0f}")
-            print(f"   Profit:  ₹{capital-start:,.0f}")
+            print(f"   Capital:  ₹{start:,.0f} → ₹{capital:,.0f}")
+            print(f"   Profit:   ₹{capital-start:,.0f}")
             print(f"   Win Rate: {win_rate:.1f}%")
+            print(f"   Trades:   {total}  Skipped: {skipped}")
             return {"capital": capital, "win_rate": win_rate}
 
         except Exception as e:

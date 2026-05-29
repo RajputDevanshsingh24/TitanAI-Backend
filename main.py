@@ -1,17 +1,21 @@
 # ============================================
-# TITAN-AI TRADER — Main Bot Engine
+# TITAN-AI TRADER — Main Bot Engine FIXED v2.0
 # TITAN-SURYA TECHNOLOGIES
+#
+# BUG FIX: last_signal ab (value, direction) dono store karta hai
+# Pehle sirf value compare hoti thi — same direction ke naye
+# valid signals bhi skip ho jaate the
 # ============================================
 
 import time
 import schedule
-import threading
 from datetime import datetime, time as dtime
 from data_fetcher import DataFetcher
 from ai_model import AIModel
 from order_manager import OrderManager
 from trainer import AutoTrainer
 from config import TRADING
+
 
 class TitanAIBot:
 
@@ -21,47 +25,35 @@ class TitanAIBot:
         print("   TITAN-SURYA TECHNOLOGIES")
         print("="*50)
 
-        self.fetcher      = DataFetcher()
-        self.model        = AIModel()
-        self.order_mgr    = OrderManager()
-        self.trainer      = AutoTrainer()
-        self.is_running   = False
-        self.mode         = TRADING["mode"]
-        self.df           = None
-        self.last_signal  = None
-        self.trade_count  = 0
+        self.fetcher     = DataFetcher()
+        self.model       = AIModel()
+        self.order_mgr   = OrderManager()
+        self.trainer     = AutoTrainer()
+        self.is_running  = False
+        self.mode        = TRADING["mode"]
+        self.df          = None
+        self.last_signal = None   # Last executed signal value
+        self.last_signal_time = None  # Uski timestamp
+        self.trade_count = 0
 
         print(f"\n✅ Bot Initialized!")
         print(f"   Mode: {'📄 PAPER' if self.mode == 'PAPER' else '💰 LIVE'}")
         print(f"   Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # ============================================
-    # MARKET OPEN HAI?
-    # ============================================
     def is_market_open(self):
-        now      = datetime.now()
-        weekday  = now.weekday()
-
-        # Weekend check
+        now     = datetime.now()
+        weekday = now.weekday()
         if weekday >= 5:
             return False
-
-        # Market hours: 9:15 AM - 3:30 PM
         market_open  = dtime(9, 15)
         market_close = dtime(15, 30)
-        current_time = now.time()
+        return market_open <= now.time() <= market_close
 
-        return market_open <= current_time <= market_close
-
-    # ============================================
-    # DATA REFRESH KARO
-    # ============================================
     def refresh_data(self):
         try:
             print(f"\n📊 Data refresh ho raha hai...")
-            self.df = self.fetcher.get_historical_data(
-                "NIFTY", days=365
-            )
+            # BUG FIX: get_best_data() use karo — GitHub CSV primary, Angel One fallback
+            self.df = self.fetcher.get_best_data("NIFTY")
             if self.df is not None:
                 print(f"✅ Data ready: {len(self.df)} rows")
                 return True
@@ -70,32 +62,26 @@ class TitanAIBot:
             print(f"❌ Data refresh error: {e}")
             return False
 
-    # ============================================
-    # AI SIGNAL LO
-    # ============================================
     def get_signal(self):
         try:
             if self.df is None:
                 self.refresh_data()
 
-            # Model load karo (agar nahi hai)
             if not self.model.is_trained:
                 loaded = self.model.load_model()
                 if not loaded:
                     print("⚠️ Model nahi mila! Training...")
-                    self.model.train(self.df)
+                    if self.df is not None:
+                        self.model.train(self.df)
+                    else:
+                        return None
 
-            # Signal lo
-            signal = self.model.predict(self.df)
-            return signal
+            return self.model.predict(self.df)
 
         except Exception as e:
             print(f"❌ Signal Error: {e}")
             return None
 
-    # ============================================
-    # EK TRADING CYCLE
-    # ============================================
     def trading_cycle(self):
         try:
             now = datetime.now().strftime("%H:%M:%S")
@@ -103,19 +89,16 @@ class TitanAIBot:
             print(f"🔄 TRADING CYCLE | {now}")
             print(f"{'='*50}")
 
-            # Market open check
             if not self.is_market_open():
                 print("🕐 Market band hai — Waiting...")
                 return
 
-            # Risk check
             can, reasons = self.order_mgr.risk.can_trade()
             if not can:
                 for r in reasons:
                     print(r)
                 return
 
-            # Signal lo
             signal = self.get_signal()
             if not signal:
                 print("❌ Signal nahi mila!")
@@ -124,38 +107,43 @@ class TitanAIBot:
             print(f"\n🎯 Signal: {signal['signal']}")
             print(f"   Confidence: {signal['confidence']:.1f}%")
 
-            # Same signal dobara mat lo
-            if signal["value"] == self.last_signal:
-                print("⚠️ Same signal — Skipping duplicate")
+            # NO TRADE skip
+            if signal["value"] == 0:
+                print("🟡 NO TRADE — Models disagree, waiting...")
                 return
 
-            # Minimum confidence check
+            # BUG FIX: last_signal check improved
+            # Pehle: signal["value"] == self.last_signal — sirf value compare
+            # Problem: agar pichla trade CALL tha aur naya bhi CALL hai
+            # toh skip hota tha — chahe 30 min baad naya valid signal ho
+            # Fix: 30 min baad same direction pe bhi trade allow karo
+            current_time = datetime.now()
+            if (self.last_signal == signal["value"] and
+                self.last_signal_time is not None):
+                mins_elapsed = (current_time - self.last_signal_time).seconds // 60
+                if mins_elapsed < 30:
+                    print(f"⚠️ Same signal ({signal['signal']}) — {mins_elapsed} min ago, skipping")
+                    return
+                else:
+                    print(f"ℹ️ Same direction but {mins_elapsed} min baad — allowing")
+
+            # Low confidence skip
             if signal["confidence"] < 55:
                 print(f"⚠️ Low confidence ({signal['confidence']:.1f}%) — Skipping")
                 return
 
-            # NO TRADE signal
-            if signal["value"] == 0:
-                print("🟡 NO TRADE — Waiting for better signal")
-                return
-
-            # Order execute karo
-            order_id = self.order_mgr.execute_signal(
-                signal, "NIFTY"
-            )
+            order_id = self.order_mgr.execute_signal(signal, "NIFTY")
 
             if order_id:
-                self.last_signal = signal["value"]
-                self.trade_count += 1
+                self.last_signal      = signal["value"]
+                self.last_signal_time = current_time
+                self.trade_count     += 1
                 print(f"\n✅ Order placed: {order_id}")
                 print(f"   Total trades today: {self.trade_count}")
 
         except Exception as e:
             print(f"❌ Trading Cycle Error: {e}")
 
-    # ============================================
-    # MONITOR OPEN TRADES
-    # ============================================
     def monitor_trades(self):
         try:
             open_trades = self.order_mgr.risk.active_trades
@@ -167,39 +155,29 @@ class TitanAIBot:
                 return
 
             for trade_id in list(open_trades.keys()):
-                result = self.order_mgr.risk.monitor_trade(
-                    trade_id, price
-                )
+                result = self.order_mgr.risk.monitor_trade(trade_id, price)
                 if result in ["SL_HIT", "TARGET_HIT"]:
                     print(f"\n🔔 Trade closed: {result}")
+                    # Reset last_signal taaki next signal fresh ho
+                    self.last_signal = None
 
         except Exception as e:
             print(f"❌ Monitor Error: {e}")
 
-    # ============================================
-    # DAILY RESET
-    # ============================================
     def daily_reset(self):
         print(f"\n{'='*50}")
         print(f"🌅 DAILY RESET - {datetime.now().strftime('%Y-%m-%d')}")
         print(f"{'='*50}")
 
-        # Summary dikhao
         self.order_mgr.risk.daily_summary()
+        self.order_mgr.risk.daily_reset()
 
-        # Reset karo
-        self.order_mgr.risk.daily_loss   = 0
-        self.order_mgr.risk.daily_profit = 0
-        self.order_mgr.risk.trades_today = 0
-        self.order_mgr.risk.bot_active   = True
-        self.last_signal = None
-        self.trade_count = 0
+        self.last_signal      = None
+        self.last_signal_time = None
+        self.trade_count      = 0
 
         print("✅ Daily reset complete!")
 
-    # ============================================
-    # STATUS DIKHAO
-    # ============================================
     def show_status(self):
         risk   = self.order_mgr.risk
         now    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -219,13 +197,9 @@ class TitanAIBot:
         print(f"   Last Signal: {self.last_signal}")
         print(f"{'='*50}")
 
-    # ============================================
-    # BOT SHURU KARO
-    # ============================================
     def start(self):
         print(f"\n🚀 BOT STARTING!")
 
-        # Connect karo
         if not self.fetcher.connect():
             print("❌ Connection failed!")
             return
@@ -233,81 +207,47 @@ class TitanAIBot:
         self.order_mgr.fetcher = self.fetcher
         self.is_running        = True
 
-        # Fresh data lo
         self.refresh_data()
 
-        # Model load karo
-        if not self.model.load_model():
+        if self.df is not None and not self.model.load_model():
             print("⚠️ Model nahi mila, training shuru...")
             self.model.train(self.df)
 
-        # Schedule setup
-        # Har 5 min mein trading cycle
         schedule.every(5).minutes.do(self.trading_cycle)
-
-        # Har 1 min mein trades monitor
         schedule.every(1).minutes.do(self.monitor_trades)
-
-        # Har 30 min mein data refresh
         schedule.every(30).minutes.do(self.refresh_data)
-
-        # Roz 9:10 AM reset
         schedule.every().day.at("09:10").do(self.daily_reset)
-
-        # Roz 3:35 PM summary
-        schedule.every().day.at("15:35").do(
-            self.order_mgr.risk.daily_summary
-        )
-
-        # Roz 11 PM auto train
-        schedule.every().day.at("23:00").do(
-            self.trainer.train_once
-        )
+        schedule.every().day.at("15:35").do(self.order_mgr.risk.daily_summary)
+        schedule.every().day.at("23:00").do(self.trainer.train_once)
 
         print(f"\n✅ Bot Running!")
         print(f"   Trading cycle: Har 5 min")
         print(f"   Auto train:    Raat 11 PM")
         print(f"   Press Ctrl+C to stop\n")
 
-        # Status dikhao
         self.show_status()
 
-        # Main loop
         try:
             while self.is_running:
                 schedule.run_pending()
                 time.sleep(30)
-
-                # Har 10 min status print
                 if datetime.now().minute % 10 == 0:
                     self.show_status()
-
         except KeyboardInterrupt:
             self.stop()
 
-    # ============================================
-    # BOT BAND KARO
-    # ============================================
     def stop(self):
         print(f"\n\n🔴 BOT STOPPING...")
         self.is_running = False
 
-        # Sab trades close karo
-        for order_id in list(
-            self.order_mgr.open_orders.keys()
-        ):
+        for order_id in list(self.order_mgr.open_orders.keys()):
             self.order_mgr.exit_trade(order_id, "BOT_STOPPED")
 
-        # Final summary
         self.order_mgr.risk.daily_summary()
         self.order_mgr.get_order_history()
-
         print("✅ Bot stopped safely!")
 
 
-# ============================================
-# MENU
-# ============================================
 def main():
     bot = TitanAIBot()
 
@@ -341,11 +281,16 @@ def main():
             print(f"   Confidence: {signal['confidence']:.1f}%")
             print(f"   RF Vote:    {signal['rf_signal']}")
             print(f"   XGB Vote:   {signal['xgb_signal']}")
+        else:
+            print("❌ Signal nahi mila!")
 
     elif choice == "4":
         bot.fetcher.connect()
         bot.refresh_data()
-        bot.model.train(bot.df)
+        if bot.df is not None:
+            bot.model.train(bot.df)
+        else:
+            print("❌ Data nahi mila, training nahi ho sakti!")
 
     elif choice == "5":
         bot.order_mgr.get_order_history()
