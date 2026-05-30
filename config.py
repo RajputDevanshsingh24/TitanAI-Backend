@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — Configuration
+# TITAN-AI TRADER — Configuration FINAL v3.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -21,9 +21,19 @@ TRADING = {
 }
 
 RISK = {
-    "stop_loss_pct" : 20,
-    "target_pct"    : 40,
+    # FIX: Pehle 20% tha — options ke liye 1.5% realistic hai
+    # NIFTY ₹23,786 pe: SL = ₹356 neeche, Target = ₹713 upar
+    "stop_loss_pct" : 1.5,
+    "target_pct"    : 3.0,
     "trailing_sl"   : True,
+}
+
+MARKET = {
+    "open_time"          : "09:15",
+    "close_time"         : "15:30",
+    "force_exit_time"    : "15:20",  # 10 min pehle sab close
+    "trading_start"      : "09:20",  # First signal 9:20 ke baad
+    "no_new_trade_after" : "14:30",  # Iske baad naya trade nahi
 }
 
 WATCHLIST = ["NIFTY", "BANKNIFTY"]
@@ -39,14 +49,15 @@ TELEGRAM = {
 }
 
 AI = {
-    "retrain_time" : "23:00",
-    "min_accuracy" : 55,
-    "lookback_days": 365,
-    "ensemble_mode": "STRICT",
+    "retrain_time"   : "23:00",
+    "min_accuracy"   : 55,
+    "lookback_days"  : 365,
+    "ensemble_mode"  : "STRICT",
+    "min_confidence" : 55,
 }
 
 print("✅ TITAN-AI Config Loaded!")
 print(f"   Mode:    {TRADING['mode']}")
 print(f"   API Key: {'SET ✅' if ANGEL_ONE['api_key'] else 'MISSING ❌'}")
-print(f"   Password:{'SET ✅' if ANGEL_ONE['password'] else 'MISSING ❌'}")
-print(f"   TOTP:    {'SET ✅' if ANGEL_ONE['totp_key'] else 'MISSING ❌'}")
+print(f"   SL:      {RISK['stop_loss_pct']}% | Target: {RISK['target_pct']}%")
+print(f"   Trading: {MARKET['trading_start']} → {MARKET['no_new_trade_after']}")
