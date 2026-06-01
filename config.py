@@ -50,7 +50,7 @@ TELEGRAM = {
 
 AI = {
     "retrain_time"   : "23:00",
-    "min_accuracy"   : 55,
+    "min_accuracy"   : 50,
     "lookback_days"  : 365,
     "ensemble_mode"  : "STRICT",
     "min_confidence" : 55,

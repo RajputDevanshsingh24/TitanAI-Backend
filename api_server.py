@@ -56,7 +56,7 @@ def can_take_new_trade():
     now = get_ist_now()
     if now.weekday() >= 5:
         return False
-    return dtime(9, 20) <= now.time() <= dtime(14, 30)
+    return dtime(9, 15) <= now.time() <= dtime(14, 30)
 
 def is_force_exit_time():
     """3:20 PM ke baad force exit."""
@@ -327,6 +327,7 @@ def run_scheduler():
 @app.on_event("startup")
 async def startup():
     print(f"🚀 TITAN-AI SERVER STARTING | {get_ist_time()}")
+    job_daily_reset() # Server start hote hi daily reset ho
     threading.Thread(target=bot.init_background, daemon=True).start()
     threading.Thread(target=run_scheduler,        daemon=True).start()
     print("✅ Server started! Bot background mein load ho raha hai...")
