@@ -1,5 +1,5 @@
 # ============================================
-# TITAN-AI TRADER — Configuration FINAL v3.0
+# TITAN-AI TRADER — Configuration v4.0
 # TITAN-SURYA TECHNOLOGIES
 # ============================================
 
@@ -21,8 +21,6 @@ TRADING = {
 }
 
 RISK = {
-    # FIX: Pehle 20% tha — options ke liye 1.5% realistic hai
-    # NIFTY ₹23,786 pe: SL = ₹356 neeche, Target = ₹713 upar
     "stop_loss_pct" : 1.5,
     "target_pct"    : 3.0,
     "trailing_sl"   : True,
@@ -31,9 +29,21 @@ RISK = {
 MARKET = {
     "open_time"          : "09:15",
     "close_time"         : "15:30",
-    "force_exit_time"    : "15:20",  # 10 min pehle sab close
-    "trading_start"      : "09:20",  # First signal 9:20 ke baad
-    "no_new_trade_after" : "14:30",  # Iske baad naya trade nahi
+    "force_exit_time"    : "15:20",
+
+    # FIX: 9:20 → 10:30 (opening volatility avoid)
+    # Opening 1 hour bahut volatile hota hai
+    "trading_start"      : "10:30",
+
+    # FIX: 14:30 → 13:30 (safer exit window)
+    "no_new_trade_after" : "13:30",
+}
+
+DATA = {
+    # FIX: daily → 5min (intraday accuracy better)
+    "interval"     : "FIVE_MINUTE",
+    "lookback_days": 60,    # 5-min data ke liye 60 din kaafi
+    "candles"      : 75,    # Ek din mein ~75 candles (6.25 hrs)
 }
 
 WATCHLIST = ["NIFTY", "BANKNIFTY"]
@@ -50,14 +60,20 @@ TELEGRAM = {
 
 AI = {
     "retrain_time"   : "23:00",
-    "min_accuracy"   : 50,
-    "lookback_days"  : 365,
+    "min_accuracy"   : 50,     # 55 → 50 (52% model bhi save ho)
     "ensemble_mode"  : "STRICT",
     "min_confidence" : 55,
+    "lookback_candles": 60,    # LSTM ke liye last 60 candles
 }
 
-print("✅ TITAN-AI Config Loaded!")
-print(f"   Mode:    {TRADING['mode']}")
-print(f"   API Key: {'SET ✅' if ANGEL_ONE['api_key'] else 'MISSING ❌'}")
-print(f"   SL:      {RISK['stop_loss_pct']}% | Target: {RISK['target_pct']}%")
-print(f"   Trading: {MARKET['trading_start']} → {MARKET['no_new_trade_after']}")
+VIX = {
+    "max_vix"          : 20.0,  # > 20 → no trade
+    "caution_vix"      : 15.0,  # 15-20 → trade with lower size
+}
+
+print("✅ TITAN-AI Config v4.0 Loaded!")
+print(f"   Mode:     {TRADING['mode']}")
+print(f"   API Key:  {'SET ✅' if ANGEL_ONE['api_key'] else 'MISSING ❌'}")
+print(f"   SL:       {RISK['stop_loss_pct']}% | Target: {RISK['target_pct']}%")
+print(f"   Window:   {MARKET['trading_start']} → {MARKET['no_new_trade_after']}")
+print(f"   Data:     {DATA['interval']} | {DATA['lookback_days']} days")
