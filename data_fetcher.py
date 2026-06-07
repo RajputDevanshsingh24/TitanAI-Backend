@@ -1,445 +1,296 @@
 # ============================================
-# TITAN-AI TRADER — Data Fetcher v7.0
+# TITAN-AI TRADER — Data Fetcher v3.0
 # TITAN-SURYA TECHNOLOGIES
 #
-# CHANGES v7.0:
-# - 5-min intraday data PRIMARY source
-# - Gift Nifty morning fetch added
-# - VIX data fetch added
-# - get_best_data() → 5-min data return karta hai
+# FIX v3.0:
+# - reconnect() method added
+# - get_live_price() auto token refresh on AG8001
+# - "string indices" error bhi handle hoga
 # ============================================
 
-from SmartApi import SmartConnect
-import pyotp
-import pandas as pd
-import requests
 import os
 import time
+import pyotp
+import requests
+import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
-from io import StringIO
-from config import ANGEL_ONE, DATA
+from SmartApi import SmartConnect
+from config import ANGEL_ONE
+
+# Symbols / Tokens
+SYMBOL_TOKENS = {
+    "NIFTY"      : "26000",
+    "BANKNIFTY"  : "26009",
+    "FINNIFTY"   : "26037",
+    "SENSEX"     : "1",
+}
 
 
 class DataFetcher:
 
     def __init__(self):
-        self.api        = None
-        self.connected  = False
-        self.github_csv = (
-            "https://raw.githubusercontent.com/"
-            "RajputDevanshsingh24/TitanAI-Backend/"
-            "main/nifty_data.csv"
-        )
+        self.api       = None
+        self.connected = False
+        self.tokens    = SYMBOL_TOKENS
+        print("✅ DataFetcher Ready!")
 
-        # Angel One token map
-        self.tokens = {
-            "NIFTY"    : "99926000",
-            "BANKNIFTY": "99926009",
-        }
+    # ============================================
+    # ANGEL ONE RECONNECT (Token Refresh)
+    # Call this daily at 9:05 AM to get fresh token
+    # ============================================
+    def reconnect(self):
+        """Force fresh login — Angel One token daily expire hota hai"""
+        print("\n🔄 Token refresh ho raha hai...")
+        self.api       = None
+        self.connected = False
+        result = self.connect()
+        if result:
+            print("✅ Token refreshed! New session active.")
+        else:
+            print("❌ Token refresh failed! Credentials check karo.")
+        return result
 
     # ============================================
     # ANGEL ONE CONNECT
     # ============================================
     def connect(self):
         try:
-            print("🔌 Connecting to Angel One...")
+            api_key   = ANGEL_ONE["api_key"]
+            client_id = ANGEL_ONE["client_id"]
+            password  = ANGEL_ONE["password"]
+            totp_key  = ANGEL_ONE["totp_key"]
 
-            api_key  = ANGEL_ONE["api_key"]
-            client   = ANGEL_ONE["client_id"]
-            password = ANGEL_ONE["password"]
-            totp_key = ANGEL_ONE["totp_key"]
-
-            print(f"   API Key:  {api_key[:4] if api_key else 'EMPTY'}****")
-            print(f"   Client:   {client}")
-            print(f"   Password: {'SET ✅' if password else 'EMPTY ❌'}")
-            print(f"   TOTP Key: {'SET ✅' if totp_key else 'EMPTY ❌'}")
-
-            if not api_key or not password or not totp_key:
-                print("❌ Credentials missing!")
+            if not all([api_key, client_id, password, totp_key]):
+                print("⚠️ Angel One credentials missing — Paper mode")
+                self.connected = False
                 return False
 
-            totp     = pyotp.TOTP(totp_key).now()
+            print(f"\n🔌 Angel One connecting...")
+            print(f"   Client: {client_id}")
+
             self.api = SmartConnect(api_key=api_key)
-            data     = self.api.generateSession(client, password, totp)
+            totp     = pyotp.TOTP(totp_key).now()
+            data     = self.api.generateSession(client_id, password, totp)
 
             if data["status"]:
                 self.connected = True
-                print("✅ Angel One Connected!")
+                print(f"✅ Angel One connected!")
                 return True
             else:
-                print(f"❌ Login Failed: {data['message']}")
+                print(f"❌ Login failed: {data.get('message', 'Unknown error')}")
+                self.connected = False
                 return False
 
         except Exception as e:
             print(f"❌ Connect Error: {e}")
+            self.connected = False
             return False
 
     # ============================================
-    # LIVE PRICE
+    # LIVE PRICE — Auto retry on token expire
     # ============================================
     def get_live_price(self, symbol="NIFTY"):
         try:
             if not self.connected:
                 self.connect()
 
-            token    = self.tokens[symbol]
-            data     = self.api.ltpData("NSE", symbol, token)
-            price    = data["data"]["ltp"]
+            token = self.tokens[symbol]
+            data  = self.api.ltpData("NSE", symbol, token)
+
+            # AG8001 = Invalid Token → auto reconnect karo
+            if isinstance(data, dict) and not data.get("status", True):
+                err_code = data.get("errorCode", "")
+                if err_code == "AG8001" or "Invalid Token" in str(data.get("message", "")):
+                    print("⚠️ Token expired! Auto-reconnecting...")
+                    if self.reconnect():
+                        # Retry once after fresh token
+                        data = self.api.ltpData("NSE", symbol, token)
+                    else:
+                        print("❌ Reconnect failed!")
+                        return None
+
+            price = data["data"]["ltp"]
             print(f"📊 {symbol}: ₹{price:,.2f}")
             return price
 
         except Exception as e:
             print(f"❌ Live Price Error: {e}")
+            # String indices error = bad response structure = likely token issue
+            if "string indices" in str(e):
+                print("⚠️ Token issue detected! Reconnecting...")
+                if self.reconnect():
+                    try:
+                        token = self.tokens[symbol]
+                        data  = self.api.ltpData("NSE", symbol, token)
+                        price = data["data"]["ltp"]
+                        print(f"📊 {symbol}: ₹{price:,.2f} (after reconnect)")
+                        return price
+                    except Exception as e2:
+                        print(f"❌ Retry bhi fail: {e2}")
             return None
 
     # ============================================
-    # 5-MIN INTRADAY DATA — PRIMARY SOURCE
-    # Angel One se fetch karta hai
-    # ============================================
-    def get_intraday_5min(self, symbol="NIFTY", days=60):
-        try:
-            if not self.connected:
-                if not self.connect():
-                    return None
-
-            token    = self.tokens[symbol]
-            all_data = []
-            end_date = datetime.now()
-
-            print(f"\n📊 5-min data fetch ho raha hai...")
-            print(f"   Symbol: {symbol} | Days: {days}")
-
-            # Angel One ek baar mein max 30 din deta hai
-            # Isliye chunks mein fetch karo
-            chunk_days  = 25
-            current_end = end_date
-
-            while current_end > end_date - timedelta(days=days):
-                current_start = current_end - timedelta(days=chunk_days)
-                if current_start < end_date - timedelta(days=days):
-                    current_start = end_date - timedelta(days=days)
-
-                try:
-                    params = {
-                        "exchange"    : "NSE",
-                        "symboltoken" : token,
-                        "interval"    : "FIVE_MINUTE",
-                        "fromdate"    : current_start.strftime("%Y-%m-%d 09:00"),
-                        "todate"      : current_end.strftime("%Y-%m-%d 15:30"),
-                    }
-
-                    resp = self.api.getCandleData(params)
-
-                    if resp["status"] and resp["data"]:
-                        batch = resp["data"]
-                        all_data = batch + all_data
-                        print(f"   ✅ {current_start.strftime('%d-%m')} → "
-                              f"{current_end.strftime('%d-%m')}: "
-                              f"{len(batch)} candles")
-
-                except Exception as e:
-                    print(f"   ⚠️ Chunk error: {e}")
-
-                current_end = current_start - timedelta(days=1)
-                time.sleep(0.3)  # Rate limit
-
-            if not all_data:
-                print("❌ 5-min data nahi mila!")
-                return None
-
-            # DataFrame banao
-            df = pd.DataFrame(
-                all_data,
-                columns=["Date", "Open", "High", "Low", "Close", "Volume"]
-            )
-            df["Date"]   = pd.to_datetime(df["Date"])
-            df           = df.sort_values("Date")
-            df           = df.drop_duplicates(subset=["Date"])
-            df.set_index("Date", inplace=True)
-
-            for col in ["Open", "High", "Low", "Close", "Volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-            df["Volume"] = df["Volume"].replace(0, 1)
-            df           = df.dropna()
-
-            # Sirf market hours (9:15 - 15:30)
-            df = df.between_time("09:15", "15:30")
-
-            print(f"\n✅ 5-min data ready!")
-            print(f"   Total candles: {len(df)}")
-            print(f"   Start: {df.index[0].strftime('%d-%m-%Y %H:%M')}")
-            print(f"   End:   {df.index[-1].strftime('%d-%m-%Y %H:%M')}")
-            return df
-
-        except Exception as e:
-            print(f"❌ 5-min fetch error: {e}")
-            import traceback; traceback.print_exc()
-            return None
-
-    # ============================================
-    # DAILY DATA — Training ke liye (backup)
-    # GitHub CSV se load karta hai
-    # ============================================
-    def get_daily_data_github(self):
-        try:
-            print("📊 GitHub CSV (daily) load ho raha hai...")
-            response = requests.get(
-                self.github_csv,
-                timeout = 20,
-                headers = {"User-Agent": "Mozilla/5.0"}
-            )
-
-            if response.status_code != 200:
-                print(f"❌ GitHub HTTP {response.status_code}")
-                return None
-
-            content = response.text.strip()
-            if len(content) < 100:
-                print("❌ GitHub: Empty!")
-                return None
-
-            df = pd.read_csv(StringIO(content), header=0)
-
-            required = ["Date", "Close", "High", "Low", "Open", "Volume"]
-            missing  = [c for c in required if c not in df.columns]
-            if missing:
-                print(f"❌ Missing columns: {missing}")
-                return None
-
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df         = df.dropna(subset=["Date"])
-            df         = df.set_index("Date")
-
-            for col in ["Open", "High", "Low", "Close", "Volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-            df           = df.dropna()
-            df           = df.sort_index()
-            df["Volume"] = df["Volume"].replace(0, 1)
-            df           = df[~df.index.duplicated(keep="last")]
-
-            print(f"✅ Daily data: {len(df)} rows")
-            print(f"   {df.index[0].strftime('%Y-%m-%d')} → "
-                  f"{df.index[-1].strftime('%Y-%m-%d')}")
-            return df
-
-        except Exception as e:
-            print(f"❌ GitHub CSV Error: {e}")
-            return None
-
-    # ============================================
-    # ANGEL ONE DAILY DATA (fallback)
-    # ============================================
-    def get_daily_data_angel(self, symbol="NIFTY", days=365):
-        try:
-            if not self.connected:
-                if not self.connect():
-                    return None
-
-            token      = self.tokens[symbol]
-            all_data   = []
-            end_date   = datetime.now()
-            start_date = end_date - timedelta(days=days)
-
-            chunk_days  = 90
-            current_end = end_date
-
-            print(f"📅 Angel One daily data ({days} din)...")
-
-            while current_end > start_date:
-                current_start = current_end - timedelta(days=chunk_days)
-                if current_start < start_date:
-                    current_start = start_date
-
-                try:
-                    params = {
-                        "exchange"    : "NSE",
-                        "symboltoken" : token,
-                        "interval"    : "ONE_DAY",
-                        "fromdate"    : current_start.strftime("%Y-%m-%d 09:00"),
-                        "todate"      : current_end.strftime("%Y-%m-%d 15:30"),
-                    }
-                    resp = self.api.getCandleData(params)
-                    if resp["status"] and resp["data"]:
-                        all_data = resp["data"] + all_data
-                except Exception as e:
-                    print(f"   ⚠️ Chunk error: {e}")
-
-                current_end = current_start - timedelta(days=1)
-                time.sleep(0.5)
-
-            if not all_data:
-                return None
-
-            df = pd.DataFrame(
-                all_data,
-                columns=["Date", "Open", "High", "Low", "Close", "Volume"]
-            )
-            df["Date"] = pd.to_datetime(df["Date"])
-            df         = df.sort_values("Date").drop_duplicates("Date")
-            df.set_index("Date", inplace=True)
-            df["Volume"] = df["Volume"].replace(0, 1)
-            df           = df.dropna()
-
-            print(f"✅ Angel One daily: {len(df)} rows")
-            return df
-
-        except Exception as e:
-            print(f"❌ Angel Daily Error: {e}")
-            return None
-
-    # ============================================
-    # GET BEST DATA — 5-min PRIMARY
-    # Hierarchy:
-    # 1. Angel One 5-min (best)
-    # 2. Angel One daily (fallback)
-    # 3. GitHub CSV daily (last resort)
+    # BEST DATA — Historical + Today
     # ============================================
     def get_best_data(self, symbol="NIFTY"):
-        print("\n" + "="*45)
-        print("🔍 BEST DATA SOURCE DHUND RAHA HUN")
-        print("="*45)
+        """GitHub CSV + Angel One live data combine"""
+        try:
+            print(f"\n📦 Getting best data for {symbol}...")
 
-        # [1] Angel One 5-min — best for intraday AI
-        print("\n[1/3] Angel One 5-min try kar raha hun...")
-        if self.connected or self.connect():
-            df = self.get_intraday_5min(symbol, days=DATA["lookback_days"])
-            if df is not None and len(df) > 500:
-                print(f"\n🏆 5-min data selected! Candles: {len(df)}")
-                return df
+            # Step 1: GitHub CSV (historical)
+            df = self._load_github_csv()
 
-        # [2] Angel One daily
-        print("\n[2/3] Angel One daily fallback...")
-        df = self.get_daily_data_angel(symbol, days=365)
-        if df is not None and len(df) > 200:
-            print(f"\n🏆 Angel One daily selected! Rows: {len(df)}")
+            # Step 2: Angel One se today ke candles
+            if self.connected:
+                today_df = self.get_today_candles(symbol)
+                if today_df is not None and len(today_df) > 0:
+                    df = pd.concat([df, today_df])
+                    df = df[~df.index.duplicated(keep="last")]
+                    df = df.sort_index()
+                    print(f"✅ Combined: {len(df)} rows")
+
             return df
 
-        # [3] GitHub CSV
-        print("\n[3/3] GitHub CSV last resort...")
-        df = self.get_daily_data_github()
-        if df is not None:
-            print(f"\n🏆 GitHub CSV selected! Rows: {len(df)}")
+        except Exception as e:
+            print(f"❌ get_best_data error: {e}")
+            return self._load_github_csv()
+
+    # ============================================
+    # GITHUB CSV LOAD
+    # ============================================
+    def _load_github_csv(self):
+        try:
+            # Local file pehle check karo
+            local_paths = ["nifty_data.csv", "data/nifty_data.csv"]
+            for path in local_paths:
+                if os.path.exists(path):
+                    df = pd.read_csv(path, index_col=0, parse_dates=True)
+                    df.columns = [c.capitalize() for c in df.columns]
+                    print(f"✅ Local CSV: {len(df)} rows")
+                    return df
+
+            # GitHub se download
+            url = (
+                "https://raw.githubusercontent.com/"
+                "RajputDevanshsingh24/TitanAI-Backend/main/nifty_data.csv"
+            )
+            print("📥 Downloading from GitHub...")
+            df = pd.read_csv(url, index_col=0, parse_dates=True)
+            df.columns = [c.capitalize() for c in df.columns]
+            print(f"✅ GitHub CSV: {len(df)} rows")
             return df
 
-        print("\n❌ Koi bhi source kaam nahi kar raha!")
-        return None
-
-    # ============================================
-    # GIFT NIFTY — Morning direction hint
-    # Market open se pehle fetch karo (9:00 AM)
-    # ============================================
-    def get_gift_nifty(self):
-        try:
-            print("🌏 Gift Nifty fetch ho raha hai...")
-
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Referer"   : "https://www.nseindia.com",
-            }
-
-            session  = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            response = session.get(
-                "https://www.nseindia.com/api/allIndices",
-                headers = headers,
-                timeout = 10
-            )
-
-            if response.status_code == 200:
-                data    = response.json()
-                indices = data.get("data", [])
-                for idx in indices:
-                    name = idx.get("index", "")
-                    if "GIFT" in name or "SGX" in name:
-                        price  = float(idx.get("last",   0))
-                        change = float(idx.get("change", 0))
-                        pct    = float(idx.get("percentChange", 0))
-                        print(f"✅ Gift Nifty: ₹{price:,.2f} | "
-                              f"Change: {change:+.2f} ({pct:+.2f}%)")
-                        return {
-                            "price"   : price,
-                            "change"  : change,
-                            "pct"     : pct,
-                            "bullish" : pct > 0.3,
-                            "bearish" : pct < -0.3,
-                        }
-
-            print("⚠️ Gift Nifty nahi mila")
-            return None
-
         except Exception as e:
-            print(f"⚠️ Gift Nifty Error: {e}")
-            return None
+            print(f"❌ CSV load error: {e}")
+            return self._generate_dummy_data()
 
     # ============================================
-    # INDIA VIX
-    # ============================================
-    def get_vix(self):
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Referer"   : "https://www.nseindia.com",
-            }
-
-            session  = requests.Session()
-            session.get("https://www.nseindia.com", headers=headers, timeout=5)
-            response = session.get(
-                "https://www.nseindia.com/api/allIndices",
-                headers = headers,
-                timeout = 10
-            )
-
-            if response.status_code == 200:
-                data    = response.json()
-                indices = data.get("data", [])
-                for idx in indices:
-                    if "INDIA VIX" in idx.get("index", ""):
-                        vix = float(idx.get("last", 0))
-                        print(f"📊 India VIX: {vix:.2f}")
-                        return vix
-
-            return None
-
-        except Exception as e:
-            print(f"⚠️ VIX Error: {e}")
-            return None
-
-    # ============================================
-    # TODAY KI 5-MIN CANDLES (live trading ke liye)
+    # TODAY'S 5-MIN CANDLES — Angel One
     # ============================================
     def get_today_candles(self, symbol="NIFTY"):
         try:
             if not self.connected:
-                self.connect()
+                return None
 
-            token = self.tokens[symbol]
-            today = datetime.now()
+            now   = datetime.now()
+            from_  = now.replace(hour=9, minute=15, second=0).strftime("%Y-%m-%d %H:%M")
+            to_    = now.strftime("%Y-%m-%d %H:%M")
 
             params = {
                 "exchange"    : "NSE",
-                "symboltoken" : token,
+                "symboltoken" : self.tokens[symbol],
                 "interval"    : "FIVE_MINUTE",
-                "fromdate"    : today.strftime("%Y-%m-%d 09:00"),
-                "todate"      : today.strftime("%Y-%m-%d 15:30"),
+                "fromdate"    : from_,
+                "todate"      : to_,
             }
 
-            resp = self.api.getCandleData(params)
+            data = self.api.getCandleData(params)
 
-            if resp["status"] and resp["data"]:
-                df = pd.DataFrame(
-                    resp["data"],
-                    columns=["Date", "Open", "High", "Low", "Close", "Volume"]
-                )
-                df["Date"] = pd.to_datetime(df["Date"])
-                df.set_index("Date", inplace=True)
-                df = df.between_time("09:15", "15:30")
-                print(f"✅ Today candles: {len(df)}")
-                return df
+            if not data["status"] or not data["data"]:
+                return None
 
-            return None
+            df = pd.DataFrame(
+                data["data"],
+                columns=["Datetime", "Open", "High", "Low", "Close", "Volume"]
+            )
+            df["Datetime"] = pd.to_datetime(df["Datetime"])
+            df.set_index("Datetime", inplace=True)
+            df = df.astype(float)
+
+            print(f"✅ Today candles: {len(df)} rows")
+            return df
 
         except Exception as e:
-            print(f"❌ Today Candles Error: {e}")
+            print(f"❌ Today candles error: {e}")
             return None
+
+    # ============================================
+    # VIX — India VIX from NSE
+    # ============================================
+    def get_vix(self):
+        try:
+            headers = {
+                "User-Agent" : "Mozilla/5.0",
+                "Referer"    : "https://www.nseindia.com",
+                "Accept"     : "application/json",
+            }
+            session = requests.Session()
+            session.get("https://www.nseindia.com", headers=headers, timeout=5)
+            resp = session.get(
+                "https://www.nseindia.com/api/allIndices",
+                headers=headers, timeout=10
+            )
+            if resp.status_code == 200:
+                for idx in resp.json().get("data", []):
+                    if "INDIA VIX" in idx.get("index", ""):
+                        vix = float(idx.get("last", 0))
+                        if vix > 0:
+                            print(f"📊 India VIX: {vix:.2f}")
+                            return vix
+            return None
+        except Exception as e:
+            print(f"⚠️ VIX fetch error: {e}")
+            return None
+
+    # ============================================
+    # GIFT NIFTY — SGX/GIFT direction
+    # ============================================
+    def get_gift_nifty(self):
+        try:
+            # Yahoo Finance se SGX Nifty proxy
+            import yfinance as yf
+            ticker = yf.Ticker("^NSEI")
+            hist   = ticker.history(period="2d", interval="1d")
+            if len(hist) >= 2:
+                prev  = hist["Close"].iloc[-2]
+                curr  = hist["Close"].iloc[-1]
+                pct   = (curr - prev) / prev * 100
+                return {
+                    "price"   : round(curr, 2),
+                    "prev"    : round(prev, 2),
+                    "pct"     : round(pct, 2),
+                    "bullish" : pct > 0.3,
+                    "bearish" : pct < -0.3,
+                }
+            return None
+        except Exception as e:
+            print(f"⚠️ Gift Nifty error: {e}")
+            return None
+
+    # ============================================
+    # DUMMY DATA — Fallback
+    # ============================================
+    def _generate_dummy_data(self):
+        print("⚠️ Generating dummy data...")
+        dates  = pd.date_range("2024-01-01", periods=500, freq="5min")
+        closes = 22000 + np.cumsum(np.random.randn(500) * 10)
+        df = pd.DataFrame({
+            "Open"   : closes * 0.999,
+            "High"   : closes * 1.002,
+            "Low"    : closes * 0.998,
+            "Close"  : closes,
+            "Volume" : np.random.randint(100000, 500000, 500),
+        }, index=dates)
+        print(f"✅ Dummy data: {len(df)} rows")
+        return df

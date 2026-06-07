@@ -12,10 +12,10 @@ from config import AI
 class AutoTrainer:
 
     def __init__(self):
-        self.fetcher       = DataFetcher()
-        self.model         = AIModel()
-        self.last_trained  = None
-        self.train_count   = 0
+        self.fetcher      = DataFetcher()
+        self.model        = AIModel()
+        self.last_trained = None
+        self.train_count  = 0
         print("✅ AutoTrainer Ready!")
 
     def train_once(self):
@@ -30,7 +30,7 @@ class AutoTrainer:
 
             df = self.fetcher.get_best_data("NIFTY")
             if df is None or len(df) < 100:
-                print("❌ Enough data nahi mila training ke liye!")
+                print("❌ Enough data nahi mila!")
                 return False
 
             accuracy = self.model.train(df)
@@ -38,25 +38,20 @@ class AutoTrainer:
             if accuracy >= AI["min_accuracy"]:
                 self.last_trained = datetime.now()
                 self.train_count += 1
-                print(f"\n✅ Training Complete!")
-                print(f"   Accuracy:    {accuracy:.2f}%")
-                print(f"   Train Count: {self.train_count}")
+                print(f"\n✅ Training Complete! Accuracy: {accuracy:.2f}%")
                 return True
             else:
-                print(f"\n⚠️ Accuracy too low: {accuracy:.2f}% "
-                      f"(min: {AI['min_accuracy']}%)")
-                print("   Model save nahi kiya!")
+                print(f"\n⚠️ Accuracy too low: {accuracy:.2f}%")
                 return False
 
         except Exception as e:
             print(f"❌ Training Error: {e}")
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
             return False
 
     def get_status(self):
         return {
-            "last_trained" : str(self.last_trained),
-            "train_count"  : self.train_count,
-            "accuracy"     : self.model.accuracy,
+            "last_trained": str(self.last_trained),
+            "train_count" : self.train_count,
+            "accuracy"    : self.model.accuracy,
         }
